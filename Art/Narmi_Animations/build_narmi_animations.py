@@ -170,7 +170,7 @@ def animate(kind, period):
                     lift=.36*(math.sin(math.pi*v)**1.1)
                     pitch=20*math.cos(math.pi*v)-23*math.sin(math.pi*v)
                 set_pose('Foot.'+side, loc=(sign*.025*math.sin(q),y,0),rot=(pitch,0,sign*3*math.sin(q)))
-                ground_foot('Foot.'+side,.006+lift)
+                ground_foot('Foot.'+side,.014+lift)
                 set_pose('Wing.'+side, rot=(-19*math.sin(q-.25),sign*(9+3.5*math.sin(2*p-.6)),sign*3*math.cos(q)))
             set_pose('Tail',rot=(-6+4*math.sin(2*p-.8),2*math.sin(p-.5),6*math.sin(p-.65)))
             set_pose('Scarf.Upper',rot=(9+7*math.sin(2*p-.8),-10+7*math.sin(2*p-.6),18+5*math.sin(p-.5)))
