@@ -7,9 +7,11 @@ using UI = UnityEngine.UI;
 
 namespace NaraTycoon
 {
-    internal sealed class GameHud
+    internal sealed partial class GameHud
     {
         internal enum Tab { Contracts, Stock, Staff }
+        const string GameTitle = "조달조달 타운";
+        const string GameSubtitle = "조달청 타이쿤";
         static readonly Color Ink = CityWorld.ColorOf("213D49");
         static readonly Color Muted = CityWorld.ColorOf("537177");
         static readonly Color Teal = CityWorld.ColorOf("23776E");
@@ -29,14 +31,14 @@ namespace NaraTycoon
         readonly NaraGame game;
         readonly Font normal, bold;
         readonly Sprite round;
-        readonly RectTransform canvas, overlay, main, map, top, desk, nav, toast, driveHUD, walkHint, growth;
-        readonly UI.Text notice, budget, hearts, happiness, day, stage, next, panelTitle, panelCount, driveText, driveValue, walkText;
+        readonly RectTransform canvas, overlay, main, map, top, desk, nav, toast, driveHUD, growth;
+        readonly UI.Text notice, budget, hearts, happiness, day, stage, next, panelTitle, panelCount, driveText, driveValue;
         readonly UI.Image progress, clockDot;
         readonly RectTransform detail, list;
-        readonly UI.Button arrivalButton, endingButton, expansionButton, siteModeButton, depotAutomationButton;
+        readonly UI.Button endingButton, expansionButton, siteModeButton, depotAutomationButton;
         readonly UI.Button viewGrowth;
         readonly UI.Text speedText, expansionText, siteModeText;
-        readonly UI.Text growthTitle, growthDetail;
+        readonly UI.Text growthTitle, growthDetail, endingButtonText;
         readonly UI.Image growthFill;
         readonly Sprite[] stepIcons = new Sprite[5];
         readonly bool[] siteAttention = new bool[CityWorld.Names.Length];
@@ -105,8 +107,8 @@ namespace NaraTycoon
             TopLeft(seal, 14, 13, 47, 48);
             var sealType = Label(seal, "市", 24, White, true, TextAnchor.MiddleCenter);
             Stretch(sealType.rectTransform);
-            Short(top, "나라장터 타이쿤", 20, Ink, true, 73, 10, 160, 29);
-            Short(top, "솔빛시 조달 상황실", 13, Muted, false, 74, 39, 146, 25);
+            Short(top, GameTitle, 20, Ink, true, 73, 10, 150, 29);
+            Short(top, GameSubtitle, 13, Muted, false, 74, 39, 146, 25);
             Sep(top, 227, 15, 1, 45);
             budget = Stat(top, "조달 예산", 246, 117, Teal);
             Sep(top, 369, 15, 1, 45);
@@ -161,22 +163,15 @@ namespace NaraTycoon
             BottomRight(milestone, 24, 23, 402, 82);
             stage = Short(milestone, "", 19, White, true, 17, 9, 365, 31);
             next = Short(milestone, "", 14, Color.Lerp(White, Pale, .45f), false, 18, 42, 367, 27);
-            endingButton = Button(milestone, "Ending unlock", "엔딩 보기", Gold, Ink, 17, ShowEnding);
+            endingButton = Button(milestone, "Ending unlock", "엔딩 보기", Gold, Ink, 17, ShowEnding, out endingButtonText);
             TopRight(endingButton.GetComponent<RectTransform>(), 13, 15, 122, 52);
             endingButton.gameObject.SetActive(false);
 
-            walkHint = Panel(main, "Available interaction", Paper);
-            BottomLeft(walkHint, 24, 115, 345, 49);
-            walkText = Label(walkHint, "", 16, Ink, true);
-            Stretch(walkText.rectTransform, 15, 15, 0, 0);
-
             driveHUD = Panel(main, "Driving information", Ink);
-            BottomLeft(driveHUD, 24, 113, 655, 111);
+            BottomLeft(driveHUD, 24, 113, 492, 111);
             driveText = Short(driveHUD, "", 21, Gold, true, 17, 8, 446, 37);
             driveValue = Short(driveHUD, "", 15, White, false, 18, 46, 476, 31);
-            Short(driveHUD, "WASD / 방향키 이동   ·   Space 제동", 13, Color.Lerp(White, Pale, .45f), false, 18, 78, 462, 23);
-            arrivalButton = Button(driveHUD, "Unload", "정차·하역  E", Gold, Ink, 17, game.FinishDriving);
-            TopRight(arrivalButton.GetComponent<RectTransform>(), 12, 20, 141, 70);
+            Short(driveHUD, "도착 시 하역   ·   Space 제동", 13, Color.Lerp(White, Pale, .45f), false, 18, 78, 462, 23);
 
             toast = Panel(canvas, "Event toast", Teal);
             AnchorTopCenter(toast, 0, 108, 460, 52);
@@ -186,6 +181,7 @@ namespace NaraTycoon
             toast.gameObject.SetActive(false);
             overlay = Make("Game screens", canvas);
             Stretch(overlay);
+            BuildTutorialHud();
         }
 
         internal void SetMode(NaraGame.ScreenState state)
@@ -198,7 +194,8 @@ namespace NaraTycoon
             overlay.gameObject.SetActive(state != NaraGame.ScreenState.Playing);
             if (state == NaraGame.ScreenState.Title) BuildTitle();
             else if (state == NaraGame.ScreenState.Paused) BuildPause();
-            else if (state == NaraGame.ScreenState.Ended) BuildEnd();
+            else if (state == NaraGame.ScreenState.Ended) BuildEndingFilm();
+            if (state != NaraGame.ScreenState.Playing) ClearTutorial();
         }
 
         void BuildTitle()
@@ -209,8 +206,8 @@ namespace NaraTycoon
             TopLeft(mark, 37, 34, 53, 53);
             Stretch(Label(mark, "市", 29, White, true, TextAnchor.MiddleCenter).rectTransform);
             Short(plaque, "솔빛시 조달 상황실", 17, Teal, true, 107, 37, 326, 42);
-            Short(plaque, "나라장터", 69, Ink, true, 36, 99, 400, 96);
-            Short(plaque, "타이쿤", 69, Teal, true, 36, 179, 400, 96);
+            Short(plaque, GameTitle, 56, Ink, true, 36, 109, 411, 96);
+            Short(plaque, GameSubtitle, 32, Teal, true, 39, 202, 407, 57);
             Sep(plaque, 39, 288, 405, 1);
             Short(plaque, "조달로 연결하고, 행복으로 성장하는 도시.", 18, Muted, false, 39, 305, 407, 49);
             bool saved = game.CanContinue;
@@ -218,7 +215,7 @@ namespace NaraTycoon
             TopLeft(start.GetComponent<RectTransform>(), 38, 372, 407, 62);
             if (saved)
                 TopLeft(Button(plaque, "New city", "새 도시 시작", Pale, Teal, 17, AskReset).GetComponent<RectTransform>(), 38, 447, 407, 42);
-            Short(plaque, "WASD 이동  ·  E 상호작용  ·  V 시점 전환", 13, Muted, false, 39, 500, 412, 28);
+            Short(plaque, "WASD 이동  ·  V 시점 전환", 13, Muted, false, 39, 500, 412, 28);
         }
 
         void BuildPause()
@@ -231,14 +228,6 @@ namespace NaraTycoon
             TopLeft(Button(panel, "Quit", "게임 종료", Pale, Teal, 17, game.Quit).GetComponent<RectTransform>(), 252, 341, 208, 52);
         }
 
-        void BuildEnd()
-        {
-            var panel = ScreenCard("행복한 스마트시티", "행복 하트 5,000개를 모아 솔빛시의 목표를 달성했습니다.", 594, 405);
-            Short(panel, $"도시 행복도 {Model.Data.Happiness:N0}   ·   하트 {Model.Data.Hearts:N0}", 25, Teal, true, 30, 125, 527, 54);
-            Short(panel, $"납품 {Model.Completed}건  ·  소요 시간 {Minutes(Model.Data.Clock)}", 20, Ink, false, 31, 193, 530, 45);
-            Short(panel, "조달로 연결하고, 행복으로 성장하는 도시.", 17, Muted, false, 31, 243, 530, 39);
-            TopLeft(Button(panel,"Back to title","타이틀로",Teal,White,20,game.ReturnToTitle).GetComponent<RectTransform>(),30,305,534,58);
-        }
 
         void AskReset()
         {
@@ -267,7 +256,7 @@ namespace NaraTycoon
         void ShowEnding()
         {
             if (!Model.CanEnd || game.Driving) return;
-            var panel = OpenModal("엔딩 보기", "누적 하트 5,000개를 달성했습니다. 솔빛시의 엔딩을 보시겠습니까?", 630, 221);
+            var panel = OpenModal("엔딩 보기", "도시 행복도 5,000을 달성했습니다. 솔빛시의 엔딩을 보시겠습니까?", 630, 221);
             TopLeft(Button(panel, "Keep playing", "계속 운영", Pale, Teal, 17, CloseModal).GetComponent<RectTransform>(), 29, 135, 272, 48);
             TopLeft(Button(panel, "Finish city", "엔딩 시작", Teal, White, 17, game.OpenEnding).GetComponent<RectTransform>(), 317, 135, 284, 48);
         }
@@ -398,23 +387,19 @@ namespace NaraTycoon
             clockDot.color = night ? CityWorld.ColorOf("879ABF") : twilight ? CityWorld.ColorOf("DB9772") : Gold;
             stage.text = $"{Model.Stage + 1:D2} / 03   {Procurement.Stages[Model.Stage]}";
             endingButton.gameObject.SetActive(Model.CanEnd && !game.Driving);
-            next.text = Model.CanEnd ? $"납품 {Model.Completed:N0}건   ·   {Minutes(d.Clock)}" :
-                $"누적 하트 {d.Happiness:N0} / {Procurement.Goal:N0}    ·    납품 {Model.Completed:N0}건";
+            endingButtonText.text = d.Ended ? "엔딩 다시 보기" : "엔딩 보기";
+            next.text = Model.CanEnd ? $"도시 행복도 {d.Happiness:N0}   ·   납품 {Model.Completed:N0}건" :
+                $"도시 행복도 {d.Happiness:N0} / {Procurement.Goal:N0}    ·    납품 {Model.Completed:N0}건";
             if (toast.gameObject.activeSelf && Time.unscaledTime >= toastUntil) toast.gameObject.SetActive(false);
             bool showDrive = game.Driving;
             bool showBuilding = !showDrive && contextSite.HasValue;
             desk.gameObject.SetActive(showBuilding);
             driveHUD.gameObject.SetActive(showDrive);
-            walkHint.gameObject.SetActive(!showDrive && game.AtSite);
             if (showDrive)
             {
-                bool ready = game.InUnloadZone;
-                driveText.text = $"{(ready ? "하역 준비" : "운송 목적지")} · {CityWorld.Names[(int)game.Destination]}";
-                string unloadStatus = ready ? "하역 구역 안" : $"하역 구역까지 {Mathf.CeilToInt(game.RemainingUnloadDistance)} m";
-                driveValue.text = $"{game.Speed:0} km/h       {unloadStatus}";
-                arrivalButton.interactable = ready;
+                driveText.text = $"운송 목적지 · {CityWorld.Names[(int)game.Destination]}";
+                driveValue.text = $"{game.Speed:0} km/h   ·   하역 구역까지 {Mathf.CeilToInt(game.RemainingUnloadDistance)} m";
             }
-            else if (game.AtSite) walkText.text = $"E   {CityWorld.Names[(int)game.Nearby]} 업무 확인";
             if (showBuilding && (lastWave != d.Wave || lastTab != (int)active || force))
             {
                 if (!chooseManually || selected < 0 || !MatchesContext(selected)) selected = FindActive();
@@ -453,7 +438,7 @@ namespace NaraTycoon
             growthTitle.text = $"{(milestone ? "도시 발전!" : "도시 발전")}   {CityPresentation.LevelName(level)}";
             viewGrowth.gameObject.SetActive(level > 0 && !game.Driving);
             int nextStep = CityPresentation.Threshold(max ? level : level + 1);
-            growthDetail.text = max ? "스마트시티 정비 완료" : $"다음 단계까지 하트 {nextStep - happinessValue:N0}";
+            growthDetail.text = max ? "스마트시티 정비 완료" : $"다음 단계까지 행복도 {nextStep - happinessValue:N0}";
             int last = CityPresentation.Threshold(level);
             float progress = max ? 1 : Mathf.InverseLerp(last, nextStep, happinessValue);
             growthFill.color = milestone ? Teal : Gold;
@@ -474,6 +459,7 @@ namespace NaraTycoon
 
         internal void UpdateMarkers()
         {
+            UpdateTutorialHud();
             if (!main.gameObject.activeSelf) return;
             var worldCamera = game.City.Camera;
             Array.Clear(siteAttention, 0, siteAttention.Length);
@@ -495,7 +481,7 @@ namespace NaraTycoon
                 if (unloading)
                 {
                     markerBg[i].color = Gold;
-                    markerText[i].text = game.InUnloadZone ? "하역 구역  E" : "하역 구역";
+                    markerText[i].text = "하역 구역";
                     markerText[i].color = Ink;
                     continue;
                 }
@@ -805,7 +791,7 @@ namespace NaraTycoon
                     15, Muted, false, 15, 51, 336, 28);
                 int add = Mathf.Min(4, Model.Capacity - Model.Stored);
                 TopLeft(Button(card, "Buy one", "+1 구매", Pale, Teal, 16, () => Purchase(material, 1)).GetComponent<RectTransform>(), 13, 92, 99, 43);
-                TopLeft(Button(card, "Buy several", $"+{Mathf.Max(1,add)} 구매", Pale, Teal, 16,
+                TopLeft(Button(card, "Buy several " + material, $"+{Mathf.Max(1,add)} 구매", Pale, Teal, 16,
                     () => Purchase(material, Mathf.Max(1,add))).GetComponent<RectTransform>(), 120, 92, 105, 43);
                 TopLeft(Button(card, "Sell one", "−1 매각", Line, Ink, 16, () =>
                 {

@@ -122,6 +122,7 @@ namespace NaraTycoon
             public int OrderSlotLevel, WarehouseLevel;
             public int TotalDelivered, SpeedTier, SpeedUnlocks;
             public float Clock, IncomeClock = IncomePeriod, NextRequestAt;
+            // Ended records whether the ending has been seen in this save.
             public bool Ended, HasPlayerLocation;
             public Vector3 PlayerLocation;
             public float PlayerYaw;

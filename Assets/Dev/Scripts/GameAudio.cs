@@ -12,7 +12,7 @@ namespace NaraTycoon
         internal float Sfx { get; private set; }
         bool quiet;
 
-        internal GameAudio(Transform parent)
+        internal GameAudio(Transform parent, AudioClip soundtrack)
         {
             Music = PlayerPrefs.GetFloat("Nara.Music", .55f);
             Sfx = PlayerPrefs.GetFloat("Nara.Sfx", .75f);
@@ -26,21 +26,10 @@ namespace NaraTycoon
             error = Make("Review request", .18f, (t, _) => Tone(410 - t * 690, t) * Mathf.Exp(-t * 12));
             reward = Make("Solbit fanfare", .85f, (t, _) =>
                 Note(t, .00f, 523) + Note(t, .11f, 659) + Note(t, .20f, 784) + Note(t, .35f, 1047));
-            float[] tune = { 0, 659, 0, 784, 880, 0, 784, 659, 587, 0, 523, 0, 587, 659, 0, 0,
-                0, 523, 0, 659, 784, 0, 659, 587, 523, 0, 440, 0, 494, 0, 523, 0 };
-            float[] bass = {130.81f, 110f, 146.83f, 98f, 130.81f, 123.47f, 110f, 98f};
-            bed.clip = Make("A morning in Solbit", 19.2f, (t, _) =>
-            {
-                int beat = Mathf.Min(31, (int)(t / .6f));
-                float lo = t % 2.4f;
-                float local = t % .6f;
-                float melody = tune[beat] == 0 ? 0 : Tone(tune[beat], local) * Mathf.Exp(-local * 5)
-                    * Mathf.Clamp01(local * 100) * .135f;
-                return melody + Tone(bass[beat / 4], lo) * Mathf.Sin(Mathf.PI * lo / 2.4f) * .087f;
-            });
+            bed.clip = soundtrack;
             bed.loop = true;
             UpdateVolume();
-            bed.Play();
+            if (soundtrack != null) bed.Play();
         }
 
         internal void Click() => effects.PlayOneShot(click, .18f);

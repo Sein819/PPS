@@ -42,6 +42,31 @@ namespace NaraTycoon
             AuthorLakesideGarden();
         }
 
+        public void AuthorFacadeGrowth()
+        {
+            var walls = new List<Renderer>();
+            var roofs = new List<Renderer>();
+            foreach (Transform lot in lots) CollectFacades(lot.Find("건축 외장"), walls, roofs);
+            foreach (Transform district in presentation.transform)
+                if (district.name == "북쪽 상업 지구" || district.name == "05 도심 스카이라인" || district.name == "04 스마트시티")
+                    CollectFacades(district, walls, roofs);
+            presentation.ConfigureFacades(walls.ToArray(), roofs.ToArray());
+        }
+
+        static void CollectFacades(Transform section, List<Renderer> walls, List<Renderer> roofs)
+        {
+            if (section == null) return;
+            foreach (var piece in section.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                Transform part = piece.transform;
+                Vector3 scale = part.localScale;
+                if (piece.sharedMaterial == null || !piece.sharedMaterial.name.StartsWith("Solbit · ", System.StringComparison.Ordinal) ||
+                    scale.x < 4.1f || scale.z < 3.25f) continue;
+                if (scale.y > 2.3f) walls.Add(piece);
+                else if (part.localPosition.y > 2.9f && scale.y <= .65f) roofs.Add(piece);
+            }
+        }
+
         void AuthorLakesideGarden()
         {
             var stage = presentation.GrowthDistrict(0);

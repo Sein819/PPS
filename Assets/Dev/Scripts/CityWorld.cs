@@ -305,6 +305,34 @@ namespace NaraTycoon
             travelRig.SetPositionAndRotation(followPosition + FollowOffset, Quaternion.LookRotation(FollowDirection));
         }
 
+        internal void PreviewEndingDevelopment(int shot, float sceneClock)
+        {
+            int stage = shot == 0 ? 0 : shot == 1 ? 3 : CityPresentation.MaxLevel;
+            presentation?.UpdateTown(CityPresentation.Threshold(stage), sceneClock);
+        }
+
+        internal void UpdateEndingCamera(int shot, float time)
+        {
+            float progress = Mathf.Clamp01(time / (shot == 2 ? 6f : 5f));
+            Vector3 target = shot switch
+            {
+                0 => Center(Site.School) + new Vector3(4, 4, 2),
+                1 => GrowthLandmark(3) + Vector3.up * 3,
+                _ => new Vector3(10, 3, 12)
+            };
+            Vector3 offset = shot switch
+            {
+                0 => new Vector3(-24, 18, -30),
+                1 => new Vector3(20, 17, -29),
+                _ => new Vector3(-58, 66, -76)
+            };
+            offset = Quaternion.Euler(0, Mathf.Lerp(-8, 8, progress), 0) * offset;
+            cameraRig.SetPositionAndRotation(target + offset, Quaternion.LookRotation(-offset));
+            var lens = cityCamera.Lens;
+            lens.OrthographicSize = (shot == 2 ? 87 : shot == 1 ? 28 : 23) - progress * 2;
+            cityCamera.Lens = lens;
+        }
+
         internal void TrackPlayer(bool track) => travelCamera.Priority = track ? 20 : 0;
 
         internal void AnimateHero(bool moving)
