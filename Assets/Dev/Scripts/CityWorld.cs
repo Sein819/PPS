@@ -6,7 +6,7 @@ using UnityEngine.Rendering.Universal;
 
 namespace NaraTycoon
 {
-    public sealed class CityWorld : MonoBehaviour
+    public sealed partial class CityWorld : MonoBehaviour
     {
         [System.Serializable]
         struct Citizen
@@ -56,23 +56,55 @@ namespace NaraTycoon
         [SerializeField] Animator heroAnimator;
         [SerializeField] GameObject reserveLevel, fleetLevel;
         [SerializeField] Transform[] officeStaff = new Transform[2];
+        [SerializeField] Animator[] staffAnimators;
         [SerializeField] Transform manualTruck, supplyTruck, deliveryTruck;
-        readonly Vector3 overview = new(-9, 37, -40);
+        [SerializeField] Transform secondSupplyTruck, secondDeliveryTruck;
+        [SerializeField] CityPresentation presentation;
+        readonly Vector3 overview = new(-53, 59, -70);
+        static readonly Rect DrivingArea = Rect.MinMaxRect(-53, -39, 77, 39);
         static readonly Vector3 FollowOffset = new(0, 14, -12.5f);
         static readonly Vector3 FollowDirection = Vector3.forward * 1.3f - FollowOffset;
         Material runtimeGlow;
+        TransportGuide transportGuide;
         Site? focus;
+        Vector3? growthFocus;
+        Transform lastFollow;
+        Vector3 followPosition, followVelocity;
+        readonly Vector2[] siteHalfExtents = new Vector2[Names.Length];
 
         internal Transform Hero => hero;
         internal Transform ManualTruck => manualTruck;
-        internal Transform SupplyTruck => supplyTruck;
-        internal Transform DeliveryTruck => deliveryTruck;
+        internal Transform Vehicle(bool supply, int slot) =>
+            supply ? (slot == 0 ? supplyTruck : secondSupplyTruck) : (slot == 0 ? deliveryTruck : secondDeliveryTruck);
         internal Camera Camera => camera;
+        internal Vector3 GrowthLandmark(int level) => presentation != null ? presentation.Landmark(level) : Center(Site.Boulevard);
         internal Vector3 Center(Site site) => (int)site < lots.Length && lots[(int)site] != null ? lots[(int)site].position : centers[(int)site];
         internal Vector3 Label(Site site) => (int)site < labels.Length && labels[(int)site] != null ? labels[(int)site].position : Center(site) + Vector3.up * 7;
         internal Vector3 Dock(Site site) => (int)site < docks.Length && docks[(int)site] != null ? docks[(int)site].position : Center(site) + V(0, Center(site).z < 0 ? 9.4f : -8.8f);
         internal Vector3 Road(Site site) => new(Center(site).x, 0, Center(site).z >= 20 ? 13 : -13);
         internal static Vector3 V(float x, float z) => new(x, 0, z);
+
+        void Awake()
+        {
+            var brain = camera.GetComponent<CinemachineBrain>();
+            brain.DefaultBlend = new CinemachineBlendDefinition(CinemachineBlendDefinition.Styles.EaseInOut, .95f);
+            for (int i = 0; i < Names.Length; i++)
+            {
+                Vector3 center = Center((Site)i);
+                var midpoint = new Vector2(center.x, center.z);
+                Rect footprint = buildings.Find(bounds => bounds.Contains(midpoint));
+                siteHalfExtents[i] = footprint.width > 0 ? footprint.size * .5f : Vector2.one * 2.5f;
+            }
+        }
+
+        internal float SiteDistance(Site site, Vector3 position)
+        {
+            Vector3 offset = position - Center(site);
+            Vector2 half = siteHalfExtents[(int)site];
+            float x = Mathf.Max(0, Mathf.Abs(offset.x) - half.x);
+            float z = Mathf.Max(0, Mathf.Abs(offset.z) - half.y);
+            return Mathf.Sqrt(x * x + z * z);
+        }
 
 #if UNITY_EDITOR
         readonly Dictionary<string, Material> materials = new();
@@ -204,6 +236,7 @@ namespace NaraTycoon
             manualTruck = Truck("Manual truck", "E3A349", false);
             supplyTruck = Truck("Reserve truck", "6F9CB9", true);
             deliveryTruck = Truck("Delivery truck", "66AB96", false);
+            AddSecondVehicles();
             UpdateActivity(new Procurement(), 0);
             ApplyDay(0);
         }
@@ -233,21 +266,43 @@ namespace NaraTycoon
         }
 #endif
 
-        internal void Focus(Site? site) => focus = site;
+        internal void Focus(Site? site)
+        {
+            focus = site;
+            growthFocus = null;
+        }
+
+        internal void FocusGrowth(int level)
+        {
+            focus = null;
+            growthFocus = GrowthLandmark(level);
+        }
 
         internal void UpdateCamera(Transform follow, bool title, float dt)
         {
-            Vector3 target = title ? V(0,0) : focus.HasValue ? Center(focus.Value) + V(6,0) : V(26,0);
-            Vector3 lookFrom = focus.HasValue && !title ? target - FollowDirection * 2.2f : overview + target;
+            bool showingDevelopment = !title && growthFocus.HasValue;
+            Vector3 target = title ? new Vector3(7, 4, 6) : showingDevelopment ? growthFocus.Value + new Vector3(4, 2, 0) :
+                focus.HasValue ? Center(focus.Value) + V(6,0) : new Vector3(13, 0, 14);
+            Vector3 lookFrom = showingDevelopment ? target + overview * .61f :
+                focus.HasValue && !title ? target - FollowDirection * 2.2f : overview + target;
             cameraRig.position = Vector3.Lerp(cameraRig.position, lookFrom, 1 - Mathf.Exp(-4 * dt));
             cameraRig.rotation = Quaternion.Slerp(cameraRig.rotation, Quaternion.LookRotation(target - lookFrom), 1 - Mathf.Exp(-4 * dt));
             var lens = cityCamera.Lens;
-            float size = title ? 43 : focus.HasValue ? 16 : 52;
+            int level = presentation != null ? presentation.CurrentLevel : 0;
+            float mapSize = level >= 5 ? 81 : level >= 2 ? 72 : level == 1 ? 65 : 59;
+            float size = title ? 55 : showingDevelopment ? (level >= 5 ? 35 : 27) : focus.HasValue ? 16 : mapSize;
             lens.OrthographicSize = Mathf.Lerp(lens.OrthographicSize, size, 1 - Mathf.Exp(-4 * dt));
             cityCamera.Lens = lens;
             if (follow == null) return;
             Vector3 flat = new Vector3(follow.position.x, 0, follow.position.z);
-            travelRig.SetPositionAndRotation(flat + FollowOffset, Quaternion.LookRotation(FollowDirection));
+            if (lastFollow != follow)
+            {
+                lastFollow = follow;
+                followPosition = flat;
+                followVelocity = Vector3.zero;
+            }
+            followPosition = Vector3.SmoothDamp(followPosition, flat, ref followVelocity, .13f, Mathf.Infinity, dt);
+            travelRig.SetPositionAndRotation(followPosition + FollowOffset, Quaternion.LookRotation(FollowDirection));
         }
 
         internal void TrackPlayer(bool track) => travelCamera.Priority = track ? 20 : 0;
@@ -262,14 +317,16 @@ namespace NaraTycoon
 
         internal void ApplyDay(float elapsed)
         {
-            float phase = elapsed % 174f / 174f;
-            float night = Mathf.SmoothStep(0, 1, Mathf.Clamp01((phase - .49f) / .14f)) *
-                (1 - Mathf.SmoothStep(0, 1, Mathf.Clamp01((phase - .86f) / .14f)));
-            camera.backgroundColor = Color.Lerp(ColorOf("B8E4EA"), ColorOf("345173"), night);
-            RenderSettings.fogColor = camera.backgroundColor;
-            sun.color = Color.Lerp(ColorOf("FFE4BE"), ColorOf("92BAF5"), night);
-            sun.intensity = Mathf.Lerp(1.55f, .42f, night);
-            fill.intensity = Mathf.Lerp(.55f, .34f, night);
+            float night = CityPresentation.NightWeight(elapsed);
+            if (presentation != null) presentation.ApplyAtmosphere(elapsed, night, camera, sun, fill);
+            else
+            {
+                camera.backgroundColor = Color.Lerp(ColorOf("B8E4EA"), ColorOf("345173"), night);
+                RenderSettings.fogColor = camera.backgroundColor;
+                sun.color = Color.Lerp(ColorOf("FFE4BE"), ColorOf("92BAF5"), night);
+                sun.intensity = Mathf.Lerp(1.55f, .42f, night);
+                fill.intensity = Mathf.Lerp(.55f, .34f, night);
+            }
             if (Application.isPlaying && runtimeGlow == null)
             {
                 runtimeGlow = new Material(lampGlow);
@@ -279,10 +336,11 @@ namespace NaraTycoon
             foreach (var light in streetLights) light.intensity = night * 5.5f;
         }
 
-        internal static bool Night(float elapsed) => elapsed % 174f > 100 && elapsed % 174f < 163;
+        internal static bool Night(float elapsed) => CityPresentation.NightWeight(elapsed) > .57f;
 
         internal void UpdateActivity(Procurement model, float t)
         {
+            if (presentation != null) presentation.UpdateTown(model.Data.Happiness, t);
             for (int i = 0; i < Procurement.Catalog.Length; i++)
                 unlocked[(int)Procurement.Catalog[i].Site].SetActive(model.IsActive(i));
             reserveLevel.SetActive(model.Data.WarehouseLevel >= 1);
@@ -290,11 +348,17 @@ namespace NaraTycoon
             int unitsPerCrate = model.Capacity > 28 ? 3 : 2;
             int visibleCrates = (model.Stored + unitsPerCrate - 1) / unitsPerCrate;
             for (int i = 0; i < stockCrates.Count; i++) stockCrates[i].SetActive(i < visibleCrates);
-            MoveWorker(officeStaff[0], Dock(Site.Office), model.Has(Upgrade.Clerk), t);
             Site labSite = Site.Factory;
             for (int i = 0; i < Procurement.Catalog.Length; i++)
                 if (model.Data.Orders[i].Step == Step.Inspect) { labSite = model.Supplier(i); break; }
-            MoveWorker(officeStaff[1], Dock(labSite), model.Has(Upgrade.Lab), t + 4);
+            for (int i = 0; i < officeStaff.Length; i++)
+            {
+                Upgrade role = (Upgrade)i;
+                Site station = role == Upgrade.Lab ? labSite : role == Upgrade.Reserve ? Site.Depot :
+                    role == Upgrade.Driver ? Site.Factory : Site.Office;
+                MoveWorker(officeStaff[i], staffAnimators != null && i < staffAnimators.Length ? staffAnimators[i] : null,
+                    Dock(station), model.Has(role), t * model.WorkerMultiplier(role) + i * 2.7f);
+            }
             foreach (var citizen in citizens)
             {
                 bool visible = unlocked[(int)citizen.Site].activeSelf && (citizen.Site != Site.Boulevard || Night(t));
@@ -309,17 +373,24 @@ namespace NaraTycoon
             }
         }
 
-        static void MoveWorker(Transform worker, Vector3 dock, bool active, float t)
+        static void MoveWorker(Transform worker, Animator animator, Vector3 dock, bool active, float t)
         {
             worker.gameObject.SetActive(active);
-            float direction = Mathf.Cos(t * .65f);
-            worker.position = dock + new Vector3(Mathf.Sin(t * .65f) * 3.4f, .06f + Mathf.Abs(Mathf.Sin(t * 9)) * .10f, 1.7f);
-            worker.rotation = Quaternion.Euler(0, direction > 0 ? 90 : -90, 0);
+            if (!active) return;
+            float phase = t % 11f;
+            bool outbound = phase < 5.5f;
+            float movement = Mathf.Clamp01(((outbound ? phase : phase - 5.5f) - 2) / 3.5f);
+            worker.position = dock + new Vector3(Mathf.Lerp(-3.3f, 3.3f, outbound ? movement : 1 - movement), .10f, 1.7f);
+            worker.rotation = Quaternion.Euler(0, outbound ? 90 : -90, 0);
+            if (animator != null) animator.SetBool("Moving", movement > 0 && movement < 1);
         }
+
+        internal Vector3 KeepClear(Vector3 p, float margin) => presentation != null ? presentation.KeepClear(p, margin) : p;
 
         internal bool Free(Vector3 p, float margin = .25f)
         {
-            if (p.x < -53 || p.x > 77 || Mathf.Abs(p.z) > 39) return false;
+            if (p.x < DrivingArea.xMin || p.x > DrivingArea.xMax || p.z < DrivingArea.yMin || p.z > DrivingArea.yMax) return false;
+            if (presentation != null && presentation.IsBlocked(p, margin)) return false;
             foreach (Rect building in buildings)
                 if (p.x > building.xMin - margin && p.x < building.xMax + margin &&
                     p.z > building.yMin - margin && p.z < building.yMax + margin)
@@ -333,33 +404,93 @@ namespace NaraTycoon
             return nearestStreet < 3.3f || Mathf.Abs(Mathf.Abs(p.z) - 13) < 3.4f;
         }
 
-        internal Vector3[] Route(Site from, Site to)
+        internal Vector3[] Route(Site from, Site to, int lane = 0)
         {
             Vector3 a = Road(from), b = Road(to);
-            if (Mathf.Abs(a.z - b.z) < .1f) return new[] { Dock(from), a, b, Dock(to) };
             float cross = Mathf.Round((a.x + b.x) / 48) * 24;
-            return new[] { Dock(from), a, V(cross, a.z), V(cross,b.z), b, Dock(to) };
+            Vector3[] path = Mathf.Abs(a.z - b.z) < .1f ? new[] { Dock(from), a, b, Dock(to) } :
+                new[] { Dock(from), a, V(cross, a.z), V(cross,b.z), b, Dock(to) };
+            if (lane != 0)
+                for (int i = 0; i < path.Length; i++) path[i] += V(lane * 1.8f, lane * 1.8f);
+            return path;
         }
 
-        internal void ShowRoute(Vector3[] path)
+        internal const float UnloadRadius = 5.25f;
+
+        internal static float DockDistance(Vector3 position, Vector3 dock) =>
+            new Vector2(position.x - dock.x, position.z - dock.z).magnitude;
+
+        internal void BeginTransportGuide(Site destination, Vector3 dock)
         {
-            int used = 0;
-            if (path != null)
-                for (int i = 1; i < path.Length; i++)
-                {
-                    Vector3 dir = (path[i] - path[i - 1]).normalized;
-                    float length = Vector3.Distance(path[i],path[i - 1]);
-                    for (float j = 1; j < length && used < routeDots.Count; j += 2.7f)
-                    {
-                        GameObject dot = routeDots[used++];
-                        dot.transform.SetPositionAndRotation(path[i - 1] + dir * j + Vector3.up * .18f, Quaternion.LookRotation(dir));
-                        dot.SetActive(true);
-                    }
-                }
-            for (int i = used; i < routeDots.Count; i++) routeDots[i].SetActive(false);
+            if (transportGuide == null)
+            {
+                var roads = new RoadGuideNetwork(root.Find("Roads and crosswalks"), DrivingArea, Free);
+                Material material = particles.GetComponent<ParticleSystemRenderer>().sharedMaterial;
+                transportGuide = new TransportGuide(roads, root, material);
+            }
+            transportGuide.Begin(dock, Label(destination));
+
+            int boundaryDashes = Mathf.Min(16, routeDots.Count);
+            for (int i = 0; i < boundaryDashes; i++)
+            {
+                float angle = i * 2 * Mathf.PI / boundaryDashes;
+                Vector3 outward = V(Mathf.Cos(angle), Mathf.Sin(angle));
+                Vector3 tangent = Vector3.Cross(outward, Vector3.up);
+                GameObject dash = routeDots[i];
+                dash.transform.SetPositionAndRotation(dock + outward * UnloadRadius + Vector3.up * .18f, Quaternion.LookRotation(tangent));
+                dash.SetActive(true);
+            }
         }
+
+        internal void UpdateTransportGuide(Vector3 position, bool atDestination, float deltaTime) =>
+            transportGuide?.Update(position, atDestination, deltaTime);
+
+        internal void EndTransportGuide()
+        {
+            if (transportGuide == null) return;
+            transportGuide.Hide();
+            foreach (var dash in routeDots) dash.SetActive(false);
+        }
+
+        void OnDestroy() => transportGuide?.Dispose();
 
 #if UNITY_EDITOR
+        void AddSecondVehicles()
+        {
+            if (secondSupplyTruck == null) secondSupplyTruck = Truck("Reserve truck 2", "97AFC7", true);
+            if (secondDeliveryTruck == null) secondDeliveryTruck = Truck("Delivery truck 2", "86B9A5", false);
+        }
+
+        public void ConfigureWorkforce(GameObject dari, RuntimeAnimatorController clips)
+        {
+            LoadPalette();
+            AddSecondVehicles();
+            Vector3 importedScale = dari.transform.localScale * .86f;
+            if (staffAnimators != null && staffAnimators.Length == Procurement.UpgradeNames.Length)
+            {
+                foreach (var animator in staffAnimators) animator.transform.localScale = importedScale;
+                return;
+            }
+            foreach (Transform old in officeStaff)
+                if (old != null) Object.DestroyImmediate(old.gameObject);
+            officeStaff = new Transform[Procurement.UpgradeNames.Length];
+            staffAnimators = new Animator[officeStaff.Length];
+            for (int i = 0; i < officeStaff.Length; i++)
+            {
+                Transform worker = Node("달이 · " + Procurement.UpgradeNames[i], root, Dock(Site.Office));
+                var visual = (GameObject)UnityEditor.PrefabUtility.InstantiatePrefab(dari, worker);
+                visual.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.Euler(-90, 0, 0));
+                visual.transform.localScale = importedScale;
+                var animator = visual.GetComponent<Animator>();
+                if (animator == null) animator = visual.AddComponent<Animator>();
+                animator.runtimeAnimatorController = clips;
+                animator.applyRootMotion = false;
+                officeStaff[i] = worker;
+                staffAnimators[i] = animator;
+                worker.gameObject.SetActive(false);
+            }
+        }
+
         Transform Truck(string name, string paint, bool supply)
         {
             Transform truck = Node(name, root);
@@ -404,13 +535,18 @@ namespace NaraTycoon
         }
 
 #if UNITY_EDITOR
-        public void UpgradeMap()
+        void LoadPalette()
         {
-            if (lots.Length >= Names.Length && lots[(int)Site.FactoryExpress] != null) return;
             const string palettePrefix = "Solbit · ";
             foreach (var asset in UnityEditor.AssetDatabase.LoadAllAssetsAtPath("Assets/Dev/Materials/Solbit Palette.mat"))
                 if (asset is Material material && material.name.StartsWith(palettePrefix, System.StringComparison.Ordinal))
                     materials[material.name.Substring(palettePrefix.Length)] = material;
+        }
+
+        public void UpgradeMap()
+        {
+            if (lots.Length >= Names.Length && lots[(int)Site.FactoryExpress] != null) return;
+            LoadPalette();
             System.Array.Resize(ref lots, Names.Length);
             System.Array.Resize(ref docks, Names.Length);
             System.Array.Resize(ref labels, Names.Length);

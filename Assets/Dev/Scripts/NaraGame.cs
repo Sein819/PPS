@@ -21,12 +21,10 @@ namespace NaraTycoon
         float refresh, saveClock, dustClock;
         bool track, changed;
         Site? focusedSite;
-        Site? cameraZone;
-        const float EnterDistance = 5.1f;
-        const float ExitDistance = 6.8f;
-        const float CameraEnterDistance = 3.2f;
-        const float CameraExitDistance = 4.4f;
+        const float EnterDistance = 2f;
+        const float ExitDistance = 3f;
         int examining = -1;
+        int cityLevel;
         MMF_Player statusPulse;
         public ScreenState Mode { get; private set; }
         public Procurement Model => model;
@@ -34,9 +32,10 @@ namespace NaraTycoon
         internal int Examining => examining;
         internal bool Driving => manual != null;
         internal float Speed => manual == null ? 0 : Mathf.Abs(manual.Speed) * 3.6f;
-        internal float Distance => manual == null ? 0 : Vector3.Distance(manual.Truck.position, manual.Path[^1]);
-        internal bool Parked => manual != null && Distance < 3.45f && Mathf.Abs(manual.Speed) < 2.65f;
         internal Site Destination => manual == null ? Site.Office : manual.Target;
+        internal Vector3 UnloadPoint => manual.Path[^1];
+        internal float RemainingUnloadDistance => Mathf.Max(0, CityWorld.DockDistance(manual.Truck.position, UnloadPoint) - CityWorld.UnloadRadius);
+        internal bool InUnloadZone => Driving && RemainingUnloadDistance == 0;
         internal Site Nearby { get; private set; }
         internal bool AtSite { get; private set; }
         internal bool CanContinue => Procurement.Valid(ReadSave());
@@ -45,7 +44,7 @@ namespace NaraTycoon
 
         sealed class Trip
         {
-            public int Id, Index;
+            public int Id, Index, Slot;
             public bool Supply, Manual, Returning;
             public Site Target;
             public Transform Truck;
@@ -86,8 +85,9 @@ namespace NaraTycoon
             model.Notice = OnNotice;
             model.Dispatch = Dispatch;
             model.Delivered = OnDelivery;
+            cityLevel = CityPresentation.LevelFor(model.Data.Happiness);
             ClearTrips();
-            city.Hero.position = city.Dock(Site.Office) + CityWorld.V(-2, .9f);
+            city.Hero.position = city.Center(Site.Office) + CityWorld.V(-2, 4.65f);
             city.Hero.rotation = Quaternion.Euler(0,195,0);
             if (model.Data.HasPlayerLocation && city.Free(model.Data.PlayerLocation, .24f))
             {
@@ -95,7 +95,6 @@ namespace NaraTycoon
                 city.Hero.rotation = Quaternion.Euler(0, model.Data.PlayerYaw, 0);
             }
             AtSite = false;
-            cameraZone = null;
             Focus(null);
             examining = -1;
             for (int i = 0; i < model.Data.Orders.Length; i++)
@@ -113,16 +112,21 @@ namespace NaraTycoon
             }
             SetMode(model.Data.Ended ? ScreenState.Ended : ScreenState.Playing);
             city.UpdateActivity(model, model.Data.Clock);
-            hud.OpenTab(GameHud.Tab.Contracts);
-            if (Driving) FollowPlayer();
+            hud.LeaveSite();
+            if (Driving)
+            {
+                FollowPlayer();
+                city.UpdateTransportGuide(manual.Truck.position, InUnloadZone, 0);
+            }
             else if (Mode == ScreenState.Playing && !UpdateSite(city.Hero.position, false)) FollowPlayer();
             else if (Mode == ScreenState.Ended) Focus(Site.Plaza);
+            if (!resume) hud.Toast("조달청 · 새 조달요청이 도착했습니다.", false);
             Save();
         }
 
         void OnNotice(int id, string message)
         {
-            hud.Toast(message, false);
+            hud.Toast(id >= 0 && NeedsAttention(id) ? $"{CityWorld.Names[(int)WorkSite(id)]} · {message}" : message, false);
             if (id >= 0 && model.Data.Orders[id].Step is Step.Request or Step.Bidding or Step.Production or Step.Inspect)
                 audio.Confirm();
         }
@@ -151,7 +155,7 @@ namespace NaraTycoon
             if (Mode != ScreenState.Playing) return;
             if (!model.SelectSpeed(tier))
             {
-                hud.Toast($"행복 하트 {Procurement.SpeedPrice(tier):N0}개가 필요합니다.", false);
+                hud.Toast($"행복 하트 {model.SpeedPrice(tier):N0}개가 필요합니다.", false);
                 return;
             }
             ApplyTimeScale();
@@ -185,7 +189,6 @@ namespace NaraTycoon
             Save();
             ClearTrips();
             AtSite = false;
-            cameraZone = null;
             Focus(null);
             SetMode(ScreenState.Title);
         }
@@ -215,6 +218,15 @@ namespace NaraTycoon
             else FollowPlayer();
         }
 
+        internal void ShowCityGrowth()
+        {
+            if (Driving || cityLevel == 0) return;
+            track = false;
+            focusedSite = null;
+            city.TrackPlayer(false);
+            city.FocusGrowth(cityLevel);
+        }
+
         void FollowPlayer()
         {
             track = true;
@@ -237,39 +249,43 @@ namespace NaraTycoon
 
         internal void CenterOrder(int id) => Focus(WorkSite(id));
 
-        internal bool CanUse(Site site, Upgrade? remote = null) =>
-            Mode == ScreenState.Playing && !Driving && ((AtSite && Nearby == site) || (remote.HasValue && model.Has(remote.Value)));
+        internal bool NeedsAttention(int id) =>
+            model.Data.Orders[id].Step is Step.Request or Step.Evaluate or Step.Materials or Step.Inspect or Step.Delivery or Step.DeliveryTrip;
 
-        internal bool RequireVisit(Site site, Upgrade? remote = null)
+        internal bool CanUse(Site site) => Mode == ScreenState.Playing && !Driving && AtSite && Nearby == site;
+
+        internal bool RequireVisit(Site site)
         {
-            if (CanUse(site, remote)) return true;
+            if (CanUse(site)) return true;
             if (!Driving) Focus(site);
             hud.Toast($"{CityWorld.Names[(int)site]} 업무 구역까지 이동하세요.", false);
             return false;
         }
 
-        internal Upgrade? RemoteFor(int id) => model.Data.Orders[id].Step switch
-        {
-            Step.Request => Upgrade.Clerk,
-            Step.Evaluate => !Procurement.Catalog[id].Critical || model.IsActive(id) ? Upgrade.Clerk : null,
-            Step.Materials => Upgrade.Reserve,
-            Step.Inspect => Upgrade.Lab,
-            Step.Delivery => Upgrade.Driver,
-            _ => null
-        };
+        internal bool Publish(int id) => RequireVisit(Site.Office) && model.Publish(id);
 
-        internal bool Publish(int id) => RequireVisit(Site.Office, RemoteFor(id)) && model.Publish(id);
+        internal void HireAutomation(Site site, Upgrade upgrade)
+        {
+            foreach (Upgrade available in Procurement.AutomationAt(site))
+            {
+                if (available != upgrade) continue;
+                if (!RequireVisit(site)) return;
+                if (model.Hire(upgrade)) Save();
+                else hud.Toast("자동화 조건과 비용을 확인하세요.", false);
+                return;
+            }
+        }
 
         internal void Review(int id, Bid bid)
         {
-            if (!RequireVisit(Site.Office, RemoteFor(id))) return;
+            if (!RequireVisit(Site.Office)) return;
             if (model.Award(id, bid)) { hud.CloseModal(); Save(); }
             else hud.Toast(model.Ineligible(id, bid), false);
         }
 
         internal void OpenInspection(int id)
         {
-            if (model.Data.Orders[id].Step != Step.Inspect || !RequireVisit(model.Supplier(id), Upgrade.Lab)) return;
+            if (model.Data.Orders[id].Step != Step.Inspect || !RequireVisit(model.Supplier(id))) return;
             examining = id;
             hud.ShowInspection(id);
         }
@@ -278,7 +294,7 @@ namespace NaraTycoon
 
         internal void Judge(int id, bool reject)
         {
-            if (!RequireVisit(model.Supplier(id), Upgrade.Lab)) return;
+            if (!RequireVisit(model.Supplier(id))) return;
             if (!model.Inspect(id, reject))
             {
                 hud.FlashInspection("판정을 다시 확인하세요. 제품의 상태와 측정값을 살펴보세요.", true);
@@ -305,15 +321,8 @@ namespace NaraTycoon
                 return;
             }
             Site origin = supply ? Site.Depot : model.Supplier(id);
-            Upgrade worker = supply ? Upgrade.Reserve : Upgrade.Driver;
-            if (!RequireVisit(origin, worker)) return;
-            bool local = CanUse(origin);
-            if (!local && (trips.Exists(t => !t.Manual && t.Supply == supply) || model.RemainingCooldown(worker) > 0))
-            {
-                hud.Toast("자동화 차량이 이동 중이거나 다음 업무를 준비하고 있습니다.", false);
-                return;
-            }
-            if (!model.Send(id, supply, local))
+            if (!RequireVisit(origin)) return;
+            if (!model.Send(id, supply, true))
             {
                 hud.Toast("비축기지에 필요한 수량을 먼저 입고하세요.", false);
                 return;
@@ -327,19 +336,21 @@ namespace NaraTycoon
             Site supplier = model.Supplier(id);
             Site origin = supply ? Site.Depot : supplier;
             Site destination = supply ? supplier : Procurement.Catalog[id].Site;
-            var path = city.Route(origin, destination);
-            Transform truck = isManual ? city.ManualTruck : supply ? city.SupplyTruck : city.DeliveryTruck;
+            int slot = model.Data.Orders[id].TruckSlot;
+            var path = city.Route(origin, destination, isManual || slot == 0 ? 0 : supply ? 1 : -1);
+            Transform truck = isManual ? city.ManualTruck : city.Vehicle(supply, slot);
             var direction = (path[1] - path[0]).normalized;
-            var trip = new Trip { Id = id, Index = 1, Supply = supply, Manual = isManual, Truck = truck, Path = path, Target = destination, Direction = direction };
+            var trip = new Trip { Id = id, Index = 1, Slot = slot, Supply = supply, Manual = isManual, Truck = truck, Path = path, Target = destination, Direction = direction };
             truck.SetPositionAndRotation(path[0], Quaternion.LookRotation(direction));
             truck.gameObject.SetActive(true);
             trips.Add(trip);
             if (!isManual) return;
             manual = trip;
             AtSite = false;
-            cameraZone = null;
+            hud.LeaveSite();
             city.Hero.gameObject.SetActive(false);
-            city.ShowRoute(path);
+            city.BeginTransportGuide(destination, UnloadPoint);
+            city.UpdateTransportGuide(truck.position, InUnloadZone, 0);
             FollowPlayer();
         }
 
@@ -348,22 +359,35 @@ namespace NaraTycoon
             trips.Clear();
             manual = null;
             city.ManualTruck.gameObject.SetActive(false);
-            city.DeliveryTruck.gameObject.SetActive(false);
-            city.SupplyTruck.gameObject.SetActive(false);
+            for (int slot = 0; slot < 2; slot++)
+            {
+                city.Vehicle(false, slot)?.gameObject.SetActive(false);
+                city.Vehicle(true, slot)?.gameObject.SetActive(false);
+            }
             city.Hero.gameObject.SetActive(true);
-            city.ShowRoute(null);
+            city.EndTransportGuide();
         }
 
         public void FinishDriving()
         {
-            if (!Parked) return;
+            if (Mode != ScreenState.Playing || !Driving) return;
+            if (!InUnloadZone)
+            {
+                hud.Toast("표시된 하역 구역까지 이동하세요.", false);
+                return;
+            }
+
             var trip = manual;
+            trip.Speed = 0;
+            Vector3 exit = trip.Truck.position - trip.Truck.right * 1.6f;
+            if (!city.Free(exit, .24f)) exit = trip.Truck.position + trip.Truck.right * 1.6f;
+            if (!city.Free(exit, .24f)) exit = trip.Truck.position;
             trip.Truck.gameObject.SetActive(false);
-            city.Hero.position = trip.Path[^1] + CityWorld.V(-1.3f, .9f);
+            city.Hero.position = new Vector3(exit.x, .10f, exit.z);
             city.Hero.gameObject.SetActive(true);
             trips.Remove(trip);
             manual = null;
-            city.ShowRoute(null);
+            city.EndTransportGuide();
             model.Arrive(trip.Id);
             if (trip.Supply) city.Burst(trip.Path[^1] + Vector3.up, 20);
             UpdateSite(city.Hero.position, false);
@@ -384,7 +408,6 @@ namespace NaraTycoon
             {
                 if (!hud.HasModal && keyboard != null)
                 {
-                    if (keyboard.tabKey.wasPressedThisFrame) hud.OpenTab(GameHud.Tab.Contracts);
                     if (keyboard.vKey.wasPressedThisFrame) ChangeView();
                     if (keyboard.eKey.wasPressedThisFrame)
                     {
@@ -399,8 +422,7 @@ namespace NaraTycoon
                 MoveWorkers(movement);
                 int before = model.Data.Happiness;
                 int deliveries = model.Completed;
-                model.Tick(dt, examining,
-                    trips.TrueForAll(t => t.Manual || t.Supply), trips.TrueForAll(t => t.Manual || !t.Supply));
+                model.Tick(dt, examining, FreeTrucks(false), FreeTrucks(true));
                 if (model.Data.Happiness > before && model.Completed == deliveries)
                 {
                     statusPulse.PlayFeedbacks();
@@ -412,6 +434,16 @@ namespace NaraTycoon
                 saveClock += dt;
                 if (changed || saveClock > 12) Save();
                 city.UpdateActivity(model, model.Data.Clock);
+                int newLevel = CityPresentation.LevelFor(model.Data.Happiness);
+                if (newLevel > cityLevel)
+                {
+                    cityLevel = newLevel;
+                    city.Burst(city.GrowthLandmark(cityLevel) + Vector3.up * 2.5f, 62);
+                    if (!Driving) city.Burst(city.Hero.position + Vector3.up * 1.6f, 12);
+                    hud.AnnounceGrowth();
+                    hud.Toast($"{CityPresentation.Threshold(cityLevel):N0} 하트 달성 · {CityPresentation.LevelName(cityLevel)}", true);
+                    audio.Reward();
+                }
             }
             float elapsed = Mode == ScreenState.Title ? 27f : model.Data.Clock;
             city.ApplyDay(elapsed);
@@ -459,29 +491,34 @@ namespace NaraTycoon
             for (int i = 0; i < CityWorld.Names.Length; i++)
             {
                 Site site = (Site)i;
-                float distance = Vector3.Distance(city.Dock(site), position);
+                float distance = city.SiteDistance(site, position);
                 if (distance >= best) continue;
                 best = distance;
                 Nearby = site;
             }
             AtSite = best < EnterDistance || (previousSite.HasValue &&
-                Vector3.Distance(city.Dock(previousSite.Value), position) <= ExitDistance);
-
-            bool leftCameraZone = cameraZone.HasValue &&
-                Vector3.Distance(city.Dock(cameraZone.Value), position) > CameraExitDistance;
-            if (leftCameraZone) cameraZone = null;
-            if (!cameraZone.HasValue && best <= CameraEnterDistance)
+                city.SiteDistance(previousSite.Value, position) <= ExitDistance);
+            if (AtSite && previousSite != Nearby)
             {
-                cameraZone = Nearby;
                 Focus(Nearby);
                 hud.Interact(Nearby);
                 return true;
             }
-            if (leftCameraZone || (previousSite.HasValue && !AtSite)) hud.LeaveSite();
-            if (!track && (leftCameraZone || (moving && (!focusedSite.HasValue ||
-                Vector3.Distance(city.Dock(focusedSite.Value), position) > CameraExitDistance))))
+            bool leftBuilding = previousSite.HasValue && !AtSite;
+            if (leftBuilding) hud.LeaveSite();
+            if (!track && (leftBuilding || (moving && (!focusedSite.HasValue ||
+                city.SiteDistance(focusedSite.Value, position) > ExitDistance))))
                 FollowPlayer();
-            return cameraZone.HasValue;
+            return AtSite;
+        }
+
+        int FreeTrucks(bool supply)
+        {
+            Upgrade role = supply ? Upgrade.Reserve : Upgrade.Driver;
+            int available = (1 << model.VehicleCount(role)) - 1;
+            foreach (var trip in trips)
+                if (!trip.Manual && trip.Supply == supply) available &= ~(1 << trip.Slot);
+            return available;
         }
 
         void MoveManual(Vector2 input, bool brake, float dt)
@@ -504,6 +541,7 @@ namespace NaraTycoon
             if (shift.sqrMagnitude > .003f && (pos - start).sqrMagnitude < shift.sqrMagnitude * .08f)
                 manual.Speed = 0;
             truck.position = pos;
+            city.UpdateTransportGuide(pos, InUnloadZone, dt);
             dustClock -= dt;
             if (!road && Mathf.Abs(manual.Speed) > 3 && dustClock < 0)
             {
@@ -514,6 +552,7 @@ namespace NaraTycoon
 
         void Slide(ref Vector3 p, Vector3 delta, float margin)
         {
+            p = city.KeepClear(p, margin);
             Vector3 candidate = p + delta;
             if (city.Free(candidate, margin)) { p = candidate; return; }
             candidate = p + new Vector3(delta.x, 0, 0);

@@ -7,6 +7,7 @@ using UnityEditor.Build.Reporting;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
 using UnityEngine.SceneManagement;
 
 namespace NaraTycoon.Editor
@@ -16,6 +17,7 @@ namespace NaraTycoon.Editor
         public const string GameScene = "Assets/Dev/Scenes/NaraTycoon.unity";
         const string Dev = "Assets/Dev";
         const string Model = Dev + "/Models/Narmi.fbx";
+        const string DariModel = Dev + "/Models/Dari.fbx";
         const string BuildPath = "Builds/NaraTycoon";
 
         [MenuItem("나라장터 타이쿤/게임 씬 열기")]
@@ -35,7 +37,17 @@ namespace NaraTycoon.Editor
         [MenuItem("나라장터 타이쿤/초기 도시 씬 생성", true)]
         static bool CanCreateCity() => AssetDatabase.LoadAssetAtPath<SceneAsset>(GameScene) == null;
 
-        public static string UpgradeExistingScene()
+        public static string UpgradeExistingScene() => EditScene(city =>
+        {
+            city.UpgradeMap();
+            ConfigureDari(city);
+        });
+
+        public static string InstallUrbanScene() => EditScene(ConfigureUrbanDistricts);
+
+        public static string InstallGrowthScene() => EditScene(city => city.AuthorGrowthMilestones());
+
+        static string EditScene(Action<CityWorld> configure)
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode)
                 throw new InvalidOperationException("Exit Play mode before editing the city scene.");
@@ -48,7 +60,7 @@ namespace NaraTycoon.Editor
             {
                 SceneManager.SetActiveScene(scene);
                 var city = scene.GetRootGameObjects().SelectMany(root => root.GetComponentsInChildren<CityWorld>()).Single();
-                city.UpgradeMap();
+                configure(city);
                 PersistMaterials(city);
                 if (!EditorSceneManager.SaveScene(scene)) throw new IOException("Could not save the revised city.");
                 AssetDatabase.SaveAssets();
@@ -93,7 +105,7 @@ namespace NaraTycoon.Editor
             var gameObject = new GameObject("나라장터 타이쿤");
             var city = new GameObject("City Map").AddComponent<CityWorld>();
             var narmi = AssetDatabase.LoadAssetAtPath<GameObject>(Model);
-            var animator = PrepareNarmi();
+            var animator = PrepareCharacter("Narmi", 72, 93);
             var cityShader = Shader.Find("Universal Render Pipeline/Lit");
             var particleShader = Shader.Find("Sprites/Default");
             var regular = AssetDatabase.LoadAssetAtPath<Font>(Dev + "/Fonts/SolbitSans-Regular.ttf");
@@ -101,8 +113,11 @@ namespace NaraTycoon.Editor
             if (regular == null || bold == null || narmi == null || cityShader == null || particleShader == null)
                 throw new InvalidOperationException("City authoring requires Narmi, the Korean fonts and the URP shaders.");
             city.Author(narmi, animator, cityShader, particleShader);
+            ConfigureDari(city);
             gameObject.AddComponent<NaraGame>().Configure(city, regular, bold);
             PersistAssets(city);
+            ConfigureUrbanDistricts(city);
+            PersistMaterials(city);
             if (!EditorSceneManager.SaveScene(scene, GameScene)) throw new IOException("Could not save the NaraTycoon scene.");
             EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(GameScene, true) }
                 .Concat(EditorBuildSettings.scenes.Where(entry => entry.path != GameScene).Select(entry => new EditorBuildSettingsScene(entry.path, false)))
@@ -139,12 +154,70 @@ namespace NaraTycoon.Editor
             }
         }
 
-        static RuntimeAnimatorController PrepareNarmi()
+        static void ConfigureDari(CityWorld city)
         {
-            const string controllerPath = Dev + "/Models/Narmi.controller";
+            RuntimeAnimatorController clips = PrepareCharacter("Dari", 48, 68);
+            city.ConfigureWorkforce(AssetDatabase.LoadAssetAtPath<GameObject>(DariModel), clips);
+        }
+
+        static void ConfigureUrbanDistricts(CityWorld city)
+        {
+            var dawn = UrbanProfile("Solbit Daylight", "FFF6E8", 0, 5, 6, .24f, 1.13f, 4, true);
+            var dusk = UrbanProfile("Solbit Sunset", "FFE7CE", -.08f, 8, 6, .38f, 1.02f, 17, false);
+            var night = UrbanProfile("Solbit Night", "D8E3FF", -.25f, 12, 4, .63f, .88f, -12, false);
+            city.AuthorUrbanDistricts(dawn, dusk, night);
+            city.AuthorGrowthMilestones();
+
+            var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(Dev + "/Materials/Dari Face.png");
+            const string faceFile = "/Materials/Dari Dari · orange, white muzzle and forehead stripes.002.mat";
+            var face = AssetDatabase.LoadAssetAtPath<Material>(Dev + faceFile);
+            if (texture == null || face == null) throw new InvalidOperationException("The baked Dari face material is missing.");
+            face.SetTexture("_BaseMap", texture);
+            face.SetColor("_BaseColor", Color.white);
+            face.SetFloat("_Smoothness", .26f);
+            EditorUtility.SetDirty(face);
+        }
+
+        static VolumeProfile UrbanProfile(string title, string tint, float exposure, float contrast, float saturation,
+            float bloomStrength, float threshold, float temperature, bool baseProfile)
+        {
+            string path = Dev + "/Materials/" + title + ".asset";
+            var saved = AssetDatabase.LoadAssetAtPath<VolumeProfile>(path);
+            if (saved != null) return saved;
+            var profile = ScriptableObject.CreateInstance<VolumeProfile>();
+            profile.name = title;
+            if (baseProfile) profile.Add<Tonemapping>().mode.Override(TonemappingMode.Neutral);
+            var adjust = profile.Add<ColorAdjustments>();
+            adjust.postExposure.Override(exposure);
+            adjust.contrast.Override(contrast);
+            adjust.saturation.Override(saturation);
+            ColorUtility.TryParseHtmlString("#" + tint, out Color filter);
+            adjust.colorFilter.Override(filter);
+
+            var bloom = profile.Add<Bloom>();
+            bloom.threshold.Override(threshold);
+            bloom.intensity.Override(bloomStrength);
+            bloom.scatter.Override(.60f);
+            profile.Add<WhiteBalance>().temperature.Override(temperature);
+            var vignette = profile.Add<Vignette>();
+            vignette.intensity.Override(baseProfile ? .17f : .21f);
+            vignette.smoothness.Override(.51f);
+            ColorUtility.TryParseHtmlString("#273B5B", out Color vignetteColor);
+            vignette.color.Override(vignetteColor);
+
+            AssetDatabase.CreateAsset(profile, path);
+            foreach (VolumeComponent component in profile.components) AssetDatabase.AddObjectToAsset(component, profile);
+            return profile;
+        }
+
+        static RuntimeAnimatorController PrepareCharacter(string character, int idleEnd, int runEnd)
+        {
+            string modelPath = Dev + "/Models/" + character + ".fbx";
+            string controllerPath = Dev + "/Models/" + character + ".controller";
             var existing = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
             if (existing != null) return existing;
-            var importer = (ModelImporter)AssetImporter.GetAtPath(Model);
+            var importer = (ModelImporter)AssetImporter.GetAtPath(modelPath);
+            if (importer == null) throw new FileNotFoundException("Character asset is missing.", modelPath);
             importer.animationType = ModelImporterAnimationType.Generic;
             importer.importAnimation = true;
             importer.optimizeGameObjects = false;
@@ -155,17 +228,17 @@ namespace NaraTycoon.Editor
             float frame = original.firstFrame;
             importer.clipAnimations = new[]
             {
-                new ModelImporterClipAnimation { name = "Idle", takeName = original.takeName, firstFrame = frame, lastFrame = frame+72, loopTime = true },
-                new ModelImporterClipAnimation { name = "Run", takeName = original.takeName, firstFrame = frame+73, lastFrame = frame+93, loopTime = true }
+                new ModelImporterClipAnimation { name = "Idle", takeName = original.takeName, firstFrame = frame, lastFrame = frame + idleEnd, loopTime = true },
+                new ModelImporterClipAnimation { name = "Run", takeName = original.takeName, firstFrame = frame + idleEnd + 1, lastFrame = frame + runEnd, loopTime = true }
             };
             importer.SaveAndReimport();
             // Assign URP materials while retaining the original paint colors from the Blender asset.
-            var modelMaterials = AssetDatabase.LoadAllAssetsAtPath(Model).OfType<Material>().ToArray();
+            var modelMaterials = AssetDatabase.LoadAllAssetsAtPath(modelPath).OfType<Material>().ToArray();
             var modelShader = Shader.Find("Universal Render Pipeline/Lit");
             foreach (Material source in modelMaterials)
             {
                 string safeName = string.Concat(source.name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
-                string path = Dev + "/Materials/Narmi " + safeName + ".mat";
+                string path = Dev + "/Materials/" + character + " " + safeName + ".mat";
                 var replacement = AssetDatabase.LoadAssetAtPath<Material>(path);
                 if (replacement == null)
                 {
@@ -176,7 +249,7 @@ namespace NaraTycoon.Editor
                 importer.AddRemap(new AssetImporter.SourceAssetIdentifier(source), replacement);
             }
             importer.SaveAndReimport();
-            var clips = AssetDatabase.LoadAllAssetsAtPath(Model).OfType<AnimationClip>().ToArray();
+            var clips = AssetDatabase.LoadAllAssetsAtPath(modelPath).OfType<AnimationClip>().ToArray();
             var controller = AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
             controller.AddParameter("Moving", AnimatorControllerParameterType.Bool);
             var stateMachine = controller.layers[0].stateMachine;

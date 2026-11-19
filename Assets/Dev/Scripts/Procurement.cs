@@ -43,18 +43,21 @@ namespace NaraTycoon
     {
         public Step Step;
         public float Timer, AutoWait;
-        public int Bid = -1, Sample, Defects, Reward, Batch;
-        public bool Manual;
+        public int Bid = -1, Sample, Defects, Reward, Funding, Batch, TruckSlot;
+        public bool Manual, Special;
     }
 
     public sealed class Procurement
     {
         public const int Goal = 5000;
         public const int BidSeconds = 30;
-        public const int ProductionSeconds = 60;
+        public const int ProductionSeconds = 45;
         public const int MaxLevel = 3;
-        const int CurrentVersion = 3;
+        const int EconomyVersion = 3;
+        const int CurrentVersion = 4;
         const int DefaultOrderLimit = 2;
+        const int MinRequestSeconds = 24;
+        const int MaxRequestSeconds = 42;
         const float IncomePeriod = 26f;
         public static readonly Contract[] Catalog =
         {
@@ -71,6 +74,9 @@ namespace NaraTycoon
 
         public static readonly string[] Stages = { "첫 번째 조달", "원자재 공급 위기", "행복한 스마트시티" };
         public static readonly string[] UpgradeNames = { "배송 직원", "품질검사팀", "원자재 운송팀", "입찰 보조 직원", "물류 운영 시스템" };
+        static readonly Upgrade[] OfficeAutomation = { Upgrade.Clerk };
+        static readonly Upgrade[] DepotAutomation = { Upgrade.Reserve, Upgrade.Fleet };
+        static readonly Upgrade[] SupplierAutomation = { Upgrade.Lab, Upgrade.Driver };
         public static readonly string[] UpgradeDetails =
         {
             "검사를 마친 물품을 직원이 트럭으로 납품합니다.",
@@ -79,12 +85,34 @@ namespace NaraTycoon
             "공고를 올리고 적격 기업을 선정합니다. 주요 계약의 기업 선정은 나르미가 맡습니다.",
             "납품·비축 차량이 빨라지고, 부족한 물량을 예산으로 자동 구매합니다."
         };
-        static readonly int[] Prices = { 90, 135, 165, 210, 270 };
-        static readonly int[] BudgetPrices = { 0, 0, 180, 0, 320 };
+        static readonly int[,] Prices =
+        {
+            { 65, 120, 215 }, { 85, 155, 245 }, { 85, 140, 235 }, { 130, 230, 340 }, { 155, 255, 410 }
+        };
+        static readonly int[,] BudgetPrices =
+        {
+            { 0, 0, 0 }, { 0, 0, 0 }, { 140, 235, 360 }, { 0, 0, 0 }, { 240, 380, 600 }
+        };
+        static readonly int[] GrowthThresholds = { 0, 100, 500, 1000, 2000, 3000, Goal };
+        static readonly int[] FacilityHearts = { 3, 4, 6, 9, 12, 15, 18 };
+        const int StandardSpeedCost = 160;
+        const int FullSpeedCost = 460;
+
+        internal static int GrowthMilestones => GrowthThresholds.Length - 1;
+        internal static int GrowthThreshold(int level) => GrowthThresholds[level];
+
+        internal static int GrowthLevel(int earnedHearts)
+        {
+            int level = GrowthMilestones;
+            while (level > 0 && earnedHearts < GrowthThreshold(level)) level--;
+            return level;
+        }
         static readonly float[] Cooldowns = { 16, 19, 18, 10, 0 };
         static readonly int[] OrderExpansionPrices = { 100, 250, 500 };
         static readonly int[] WarehouseCapacities = { 9, 18, 28, 42 };
         static readonly int[] WarehouseExpansionPrices = { 180, 320, 520 };
+        const int SpecialChancePercent = 8;
+        const int SpecialFundingPremium = 550;
         readonly System.Random random;
 
         [Serializable]
@@ -98,7 +126,7 @@ namespace NaraTycoon
             public Vector3 PlayerLocation;
             public float PlayerYaw;
             public bool[] Commissioned;
-            public float[] ReorderAt, ReadyAt;
+            public float[] ReorderAt, ReadyAt, ReadyAtSecond;
             public int[] Levels;
             public Order[] Orders;
         }
@@ -113,7 +141,7 @@ namespace NaraTycoon
         public int WarehouseExpansionPrice => CanExpandWarehouse ? WarehouseExpansionPrices[Data.WarehouseLevel] : 0;
         public int NextWarehouseCapacity => CanExpandWarehouse ? WarehouseCapacities[Data.WarehouseLevel + 1] : Capacity;
         public int Stored => Data.Aluminum + Data.Copper;
-        public bool CanEnd => Data.Hearts >= Goal;
+        public bool CanEnd => Data.Happiness >= Goal;
         public int Completed => Data.TotalDelivered;
         public int ActiveFacilities { get { int count = 0; foreach (bool active in Data.Commissioned) if (active) count++; return count; } }
         public int ActiveOrders { get { int count = 0; foreach (var order in Data.Orders) if (order.Step != Step.Locked) count++; return count; } }
@@ -137,8 +165,20 @@ namespace NaraTycoon
             Data.ReorderAt ??= new float[Catalog.Length];
             Data.Levels ??= new int[UpgradeNames.Length];
             Data.ReadyAt ??= new float[UpgradeNames.Length];
+            Data.ReadyAtSecond ??= new float[UpgradeNames.Length];
             if (Data.Version == 1) MigrateLegacyOrders();
-            if (Data.Version < CurrentVersion) MigrateEconomy();
+            if (Data.Version < EconomyVersion) MigrateEconomy();
+            if (Data.Version < CurrentVersion)
+            {
+                for (int i = 0; i < Data.Orders.Length; i++)
+                {
+                    var order = Data.Orders[i];
+                    if (order.Step <= Step.Locked || order.Step >= Step.Complete) continue;
+                    order.Reward = RollReward(BaseHearts(i, order.Special));
+                    order.Funding = RollReward(BaseFunding(i, order.Special));
+                }
+                Data.Version = CurrentVersion;
+            }
             if (data == null)
             {
                 Receive(0);
@@ -158,7 +198,6 @@ namespace NaraTycoon
                 }
                 else if (Data.Orders[i].Step != Step.Locked)
                 {
-                    Data.Orders[i].Reward = Catalog[i].Reward;
                     Data.Orders[i].Timer = Mathf.Min(Data.Orders[i].Timer,
                         Data.Orders[i].Step == Step.Bidding ? BidSeconds : ProductionSeconds);
                 }
@@ -177,8 +216,11 @@ namespace NaraTycoon
             while (CanExpandWarehouse && Capacity < needed) Data.WarehouseLevel++;
 
             if (Data.Version == 1 || Data.NextRequestAt == 0) ScheduleRequest();
-            else Data.NextRequestAt = Data.Clock + Mathf.Max(0, Data.NextRequestAt - Data.Clock) * 1.5f;
-            Data.Version = CurrentVersion;
+            else Data.NextRequestAt = Data.Clock + Mathf.Clamp(Data.NextRequestAt - Data.Clock, 0, MaxRequestSeconds);
+            foreach (var order in Data.Orders)
+                if (order.Step == Step.Production && order.Sample == 0 && !order.Special)
+                    order.Timer = Mathf.Min(order.Timer, ProductionSeconds + 5);
+            Data.Version = EconomyVersion;
         }
 
         public static bool Valid(Progress data) => data != null && data.Version is >= 1 and <= CurrentVersion &&
@@ -186,20 +228,51 @@ namespace NaraTycoon
             Array.TrueForAll(data.Orders, order => order != null && Enum.IsDefined(typeof(Step), order.Step)) &&
             (data.Version == 1 || data.Commissioned?.Length == Catalog.Length && data.ReorderAt?.Length == Catalog.Length &&
                 data.Levels?.Length == UpgradeNames.Length && data.ReadyAt?.Length == UpgradeNames.Length) &&
-            (data.Version < CurrentVersion || data.OrderSlotLevel >= 0 && data.OrderSlotLevel <= OrderExpansionPrices.Length &&
+            (data.Version < EconomyVersion || data.OrderSlotLevel >= 0 && data.OrderSlotLevel <= OrderExpansionPrices.Length &&
                 data.WarehouseLevel >= 0 && data.WarehouseLevel < WarehouseCapacities.Length);
 
         public int Level(Upgrade upgrade) => Data.Levels[(int)upgrade];
         public bool Has(Upgrade upgrade) => Level(upgrade) > 0;
         public bool IsActive(int id) => Data.Commissioned[id];
-        public float WorkerMultiplier(Upgrade upgrade) => 1 + .25f * Mathf.Max(0, Level(upgrade) - 1);
+        public float WorkerMultiplier(Upgrade upgrade) => Level(upgrade) switch { 2 => 1.3f, 3 => 1.65f, _ => 1f };
         public float FleetMultiplier => Has(Upgrade.Fleet) ? 1.18f + .14f * (Level(Upgrade.Fleet) - 1) : 1;
-        public float Cooldown(Upgrade upgrade) => Cooldowns[(int)upgrade] * (Level(upgrade) switch { 2 => .75f, 3 => .55f, _ => 1f });
-        public float RemainingCooldown(Upgrade upgrade) => Mathf.Max(0, Data.ReadyAt[(int)upgrade] - Data.Clock);
-        public int UpgradePrice(Upgrade upgrade) => Prices[(int)upgrade] * (Level(upgrade) + 1);
-        public int UpgradeBudgetPrice(Upgrade upgrade) => BudgetPrices[(int)upgrade] * (Level(upgrade) + 1);
+        public float Cooldown(Upgrade upgrade) => Cooldowns[(int)upgrade] * (Level(upgrade) switch { 2 => .7f, 3 => .45f, _ => 1f });
+        public float RemainingCooldown(Upgrade upgrade, int slot = 0) =>
+            Mathf.Max(0, (slot == 0 ? Data.ReadyAt : Data.ReadyAtSecond)[(int)upgrade] - Data.Clock);
+        public int VehicleCount(Upgrade upgrade) => Level(upgrade) == MaxLevel ? 2 : 1;
+        public int UpgradePrice(Upgrade upgrade) => Prices[(int)upgrade, Mathf.Min(Level(upgrade), MaxLevel - 1)];
+        public int UpgradeBudgetPrice(Upgrade upgrade) => BudgetPrices[(int)upgrade, Mathf.Min(Level(upgrade), MaxLevel - 1)];
         public Site Supplier(int id) => Data.Orders[id].Bid switch { 1 => Site.FactoryTech, 2 => Site.FactoryExpress, _ => Site.Factory };
         public static bool IsSupplier(Site site) => site is Site.Factory or Site.FactoryTech or Site.FactoryExpress;
+        internal static ReadOnlySpan<Upgrade> AutomationAt(Site site) => site switch
+        {
+            Site.Office => OfficeAutomation,
+            Site.Depot => DepotAutomation,
+            Site.Factory or Site.FactoryTech or Site.FactoryExpress => SupplierAutomation,
+            _ => ReadOnlySpan<Upgrade>.Empty
+        };
+
+        public Resource RequiredMaterial(int id) => RequiredMaterial(id, Data.Orders[id].Special);
+        public int RequiredUnits(int id) => RequiredUnits(id, Data.Orders[id].Special);
+
+        static Resource RequiredMaterial(int id, bool special)
+        {
+            Resource material = Catalog[id].Material;
+            return special && material == Resource.None ? Resource.Copper : material;
+        }
+
+        static int RequiredUnits(int id, bool special) =>
+            special ? Mathf.Max(10, Catalog[id].MaterialUnits + 7) : Catalog[id].MaterialUnits;
+
+        public int BudgetReward(int id) => Data.Orders[id].Funding;
+        static int BaseHearts(int id, bool special) => Catalog[id].Reward * (special ? 3 : 1);
+        static int BaseFunding(int id, bool special)
+        {
+            int materials = RequiredUnits(id, special) * UnitPrice(RequiredMaterial(id, special));
+            return Catalog[id].Limit + 38 + materials + (special ? SpecialFundingPremium : 0);
+        }
+
+        public int RequiredQuality(int id) => Catalog[id].Quality + (Data.Orders[id].Special ? 4 : 0);
         public int Stock(Resource resource) => resource == Resource.Aluminum ? Data.Aluminum : Data.Copper;
         public static string MaterialName(Resource material) => material == Resource.Aluminum ? "알루미늄" : "구리";
         public static int UnitPrice(Resource material) => material == Resource.Aluminum ? 28 : 40;
@@ -247,8 +320,11 @@ namespace NaraTycoon
             return true;
         }
 
-        public static int SpeedPrice(int tier) => tier == 1 ? 300 : 1000;
-        public bool HasSpeed(int tier) => tier == 0 || (Data.SpeedUnlocks & (1 << tier)) != 0;
+        public int SpeedPrice(int tier) => HasSpeed(tier) ? 0 : tier == 1 ? StandardSpeedCost :
+            FullSpeedCost - (HasSpeed(1) ? StandardSpeedCost : 0);
+
+        public bool HasSpeed(int tier) => tier == 0 || (Data.SpeedUnlocks & (1 << tier)) != 0 ||
+            (tier == 1 && (Data.SpeedUnlocks & (1 << 2)) != 0);
 
         public bool SelectSpeed(int tier)
         {
@@ -303,7 +379,7 @@ namespace NaraTycoon
             Contract c = Catalog[id];
             var problems = new List<string>(4);
             if (!bid.Licensed) problems.Add("참가자격 미충족");
-            if (bid.Quality < c.Quality) problems.Add("품질 기준 미달");
+            if (bid.Quality < RequiredQuality(id)) problems.Add("품질 기준 미달");
             if (bid.Days > c.Deadline) problems.Add("납기 초과");
             if (bid.Price > c.Limit) problems.Add("공고 상한 초과");
             if (bid.Price > Data.Budget) problems.Add("보유 예산 부족");
@@ -322,24 +398,26 @@ namespace NaraTycoon
             if (Data.Orders[id].Step != Step.Evaluate || Ineligible(id, bid).Length > 0) return false;
             Data.Budget -= bid.Price;
             Data.Orders[id].Bid = bid.Slot;
-            if (Catalog[id].Material != Resource.None)
+            if (RequiredMaterial(id) != Resource.None)
                 Set(id, Step.Materials, 0, $"{bid.Company} 계약 · 원자재 공급 요청");
             else
                 Produce(id, $"{bid.Company} 계약 · 생산 시작");
             return true;
         }
 
-        public bool Send(int id, bool supply, bool manual)
+        public bool Send(int id, bool supply, bool manual, int truckSlot = 0)
         {
             Order order = Data.Orders[id];
-            Contract contract = Catalog[id];
             if (order.Step != (supply ? Step.Materials : Step.Delivery)) return false;
             if (supply)
             {
-                if (Stock(contract.Material) < contract.MaterialUnits) return false;
-                AdjustStock(contract.Material, -contract.MaterialUnits);
+                Resource material = RequiredMaterial(id);
+                int units = RequiredUnits(id);
+                if (Stock(material) < units) return false;
+                AdjustStock(material, -units);
             }
             order.Manual = manual;
+            order.TruckSlot = manual ? 0 : truckSlot;
             Set(id, supply ? Step.SupplyTrip : Step.DeliveryTrip, 0, supply ? "원자재 상차 완료" : "납품 물품 상차 완료");
             Dispatch?.Invoke(id, supply, manual);
             return true;
@@ -350,17 +428,18 @@ namespace NaraTycoon
             var order = Data.Orders[id];
             if (order.Step == Step.SupplyTrip)
             {
-                if (!order.Manual) Rest(Upgrade.Reserve);
+                if (!order.Manual) Rest(Upgrade.Reserve, order.TruckSlot);
                 order.Manual = false;
                 Produce(id, "원자재 도착 · 기업 생산 재개");
                 return;
             }
             if (order.Step != Step.DeliveryTrip) return;
-            if (!order.Manual) Rest(Upgrade.Driver);
+            if (!order.Manual) Rest(Upgrade.Driver, order.TruckSlot);
             Contract c = Catalog[id];
             bool first = !IsActive(id);
             int reward = order.Reward;
-            Data.Budget += c.Limit + 38;
+            int funding = BudgetReward(id);
+            Data.Budget += funding;
             Data.Hearts += reward;
             Data.Happiness += reward;
             Data.TotalDelivered++;
@@ -369,16 +448,17 @@ namespace NaraTycoon
             Data.Orders[id] = new Order();
             if (first && id == Stage && Stage < 2) Data.Wave++;
             Changed?.Invoke(id);
-            Delivered?.Invoke(id, $"{c.Buyer} {(first ? "활성화" : "납품 완료")} · 하트 +{reward}");
+            string outcome = order.Special ? "특별 조달 완료" : first ? $"{c.Buyer} 활성화" : $"{c.Buyer} 납품 완료";
+            Delivered?.Invoke(id, $"{outcome} · 하트 +{reward} · 예산 +{funding:N0}만원");
         }
 
-        public int SampleCount(int id) => id == 0 ? 5 : 4;
+        public int SampleCount(int id) => Data.Orders[id].Special ? 7 : id == 0 ? 5 : 4;
         public bool HasDefect(int id)
         {
             Order order = Data.Orders[id];
             int sample = (order.Sample + order.Batch) % SampleCount(id);
             return sample == (id + 1) % SampleCount(id) ||
-                (id == 0 && sample == 3) || (order.Bid == 0 && id > 0 && sample == (id + 3) % SampleCount(id));
+                (id == 0 && sample == 3) || ((order.Special || order.Bid == 0 && id > 0) && sample == (id + 3) % SampleCount(id));
         }
 
         public bool Inspect(int id, bool reject)
@@ -394,7 +474,7 @@ namespace NaraTycoon
             return true;
         }
 
-        public void Tick(float dt, int inspecting, bool driverFree, bool supplyFree)
+        public void Tick(float dt, int inspecting, int driverFree, int supplyFree)
         {
             Data.Clock += dt;
             Data.IncomeClock -= dt;
@@ -402,11 +482,13 @@ namespace NaraTycoon
             {
                 Data.IncomeClock += IncomePeriod;
                 int active = ActiveFacilities;
-                Data.Budget += 26 + active * 7;
+                int growth = GrowthLevel(Data.Happiness);
+                Data.Budget += RollReward(26 + active * (7 + growth * 2));
                 if (active > 0)
                 {
-                    Data.Hearts += active * 3;
-                    Data.Happiness += active * 3;
+                    int reward = RollReward(active * FacilityHearts[growth]);
+                    Data.Hearts += reward;
+                    Data.Happiness += reward;
                 }
             }
 
@@ -428,10 +510,13 @@ namespace NaraTycoon
                         foreach (var bid in Offers(i))
                             if (bid.Slot == 1 && Award(i, bid)) { Rest(Upgrade.Clerk); break; }
                         break;
-                    case Step.Materials when supplyFree && Ready(Upgrade.Reserve, order, 5):
-                        int missing = c.MaterialUnits - Stock(c.Material);
-                        if (missing > 0 && Has(Upgrade.Fleet)) Buy(c.Material, missing);
-                        if (Send(i, true, false)) supplyFree = false;
+                    case Step.Materials:
+                        int reserveSlot = AvailableTruck(Upgrade.Reserve, order, 5, supplyFree);
+                        if (reserveSlot < 0) break;
+                        Resource material = RequiredMaterial(i);
+                        int missing = RequiredUnits(i) - Stock(material);
+                        if (missing > 0 && Has(Upgrade.Fleet)) Buy(material, missing);
+                        if (Send(i, true, false, reserveSlot)) supplyFree &= ~(1 << reserveSlot);
                         break;
                     case Step.Production:
                         if ((order.Timer -= dt) <= 0)
@@ -444,8 +529,9 @@ namespace NaraTycoon
                         while (order.Step == Step.Inspect) Inspect(i, HasDefect(i));
                         Rest(Upgrade.Lab);
                         break;
-                    case Step.Delivery when driverFree && Ready(Upgrade.Driver, order, 6):
-                        if (Send(i, false, false)) driverFree = false;
+                    case Step.Delivery:
+                        int driverSlot = AvailableTruck(Upgrade.Driver, order, 6, driverFree);
+                        if (driverSlot >= 0 && Send(i, false, false, driverSlot)) driverFree &= ~(1 << driverSlot);
                         break;
                 }
             }
@@ -455,7 +541,16 @@ namespace NaraTycoon
         bool Ready(Upgrade upgrade, Order order, float preparation) =>
             Has(upgrade) && RemainingCooldown(upgrade) <= 0 && order.AutoWait >= preparation / WorkerMultiplier(upgrade);
 
-        void Rest(Upgrade upgrade) => Data.ReadyAt[(int)upgrade] = Data.Clock + Cooldown(upgrade);
+        int AvailableTruck(Upgrade upgrade, Order order, float preparation, int available)
+        {
+            if (!Has(upgrade) || order.AutoWait < preparation / WorkerMultiplier(upgrade)) return -1;
+            for (int slot = 0; slot < VehicleCount(upgrade); slot++)
+                if ((available & (1 << slot)) != 0 && RemainingCooldown(upgrade, slot) <= 0) return slot;
+            return -1;
+        }
+
+        void Rest(Upgrade upgrade, int slot = 0) =>
+            (slot == 0 ? Data.ReadyAt : Data.ReadyAtSecond)[(int)upgrade] = Data.Clock + Cooldown(upgrade);
 
         void TryReceive()
         {
@@ -477,17 +572,29 @@ namespace NaraTycoon
             if (selected >= 0) Receive(selected);
         }
 
-        void ScheduleRequest() => Data.NextRequestAt = Data.Clock + random.Next(36, 73);
+        void ScheduleRequest() => Data.NextRequestAt = Data.Clock + random.Next(MinRequestSeconds, MaxRequestSeconds + 1);
 
         void Receive(int id)
         {
-            int reward = Catalog[id].Reward;
-            int variation = reward / 10;
-            Data.Orders[id] = new Order { Reward = reward + random.Next(-variation, variation + 1), Batch = IsActive(id) ? random.Next(SampleCount(id)) : 0 };
-            Set(id, Step.Request, 0, $"새 조달요청 · {Catalog[id].Item}");
+            bool special = Stage == 2 && Capacity >= 18 && random.Next(100) < SpecialChancePercent;
+            Data.Orders[id] = new Order
+            {
+                Special = special,
+                Reward = RollReward(BaseHearts(id, special)),
+                Funding = RollReward(BaseFunding(id, special))
+            };
+            if (IsActive(id) || special) Data.Orders[id].Batch = random.Next(SampleCount(id));
+            Set(id, Step.Request, 0, $"{(special ? "특별 조달요청" : "새 조달요청")} · {Catalog[id].Item}");
         }
 
-        void Produce(int id, string message) => Set(id, Step.Production, ProductionSeconds, message);
+        int RollReward(int amount)
+        {
+            int spread = amount / 10;
+            return amount + random.Next(-spread, spread + 1);
+        }
+
+        void Produce(int id, string message) => Set(id, Step.Production,
+            Data.Orders[id].Special ? random.Next(120, 161) : random.Next(ProductionSeconds - 5, ProductionSeconds + 6), message);
 
         void AdjustStock(Resource resource, int change)
         {
