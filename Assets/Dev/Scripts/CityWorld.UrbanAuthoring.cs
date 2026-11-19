@@ -190,7 +190,7 @@ namespace NaraTycoon
                     part.localPosition += Vector3.forward * 12.5f;
                     renderer.sharedMaterial = Material(size.x == 134 ? "A2B999" : "718F94");
                 }
-                else if (size.x == 380) renderer.sharedMaterial = Material(River);
+                else if (size.x == SeaSize) renderer.sharedMaterial = Material(River);
             }
             foreach (Transform hill in root.Find("Trees and foothills"))
                 if (hill.name == "Soft foothill") hill.localPosition += Vector3.forward * 39;

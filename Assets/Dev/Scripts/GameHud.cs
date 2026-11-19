@@ -10,6 +10,7 @@ namespace NaraTycoon
     internal sealed partial class GameHud
     {
         internal enum Tab { Contracts, Stock, Staff }
+        const int StatValueFontSize = 24;
         const string GameTitle = "조달조달 타운";
         const string GameSubtitle = "조달청 타이쿤";
         static readonly Color Ink = CityWorld.ColorOf("213D49");
@@ -32,8 +33,8 @@ namespace NaraTycoon
         readonly Font normal, bold;
         readonly Sprite round;
         readonly RectTransform canvas, overlay, main, map, top, desk, nav, toast, driveHUD, growth;
-        readonly UI.Text notice, budget, hearts, happiness, day, stage, next, panelTitle, panelCount, driveText, driveValue;
-        readonly UI.Image progress, clockDot;
+        readonly UI.Text budget, hearts, happiness, day, stage, next, panelTitle, panelCount, driveText, driveValue;
+        readonly UI.Image clockDot;
         readonly RectTransform detail, list;
         readonly UI.Button endingButton, expansionButton, siteModeButton, depotAutomationButton;
         readonly UI.Button viewGrowth;
@@ -51,10 +52,11 @@ namespace NaraTycoon
         int modalId = -1;
         Order modalOrder;
         Step modalStep;
-        UI.Text inspectionStatus;
+        readonly UI.Button viewButton;
+        readonly UI.Text viewButtonText;
         RectTransform modal;
         UI.Text detailTimer;
-        float toastUntil, growthUntil;
+        float growthUntil;
         int selected = -1;
         int lastWave = -1, lastTab = -1;
         bool chooseManually;
@@ -115,8 +117,6 @@ namespace NaraTycoon
             hearts = Stat(top, "행복 하트", 389, 98, Rose);
             Sep(top, 500, 15, 1, 45);
             happiness = Stat(top, "도시 행복도", 520, 121, Teal);
-            progress = Flat(top, Teal);
-            TopLeft(progress.rectTransform, 389, 62, 98, 3);
 
             growth = Panel(main, "City development", Ink);
             TopLeft(growth, 24, 108, 319, 73);
@@ -155,9 +155,9 @@ namespace NaraTycoon
             BottomStretch(detail, 18, 18, 9, 141);
 
             nav = Panel(main, "Navigation", Paper);
-            BottomLeft(nav, 24, 23, 280, 82);
-            TopLeft(Button(nav, "City overview", "도시 전경", Pale, Teal, 16, () => game.Focus(null)).GetComponent<RectTransform>(), 12, 14, 124, 54);
-            TopLeft(Button(nav, "Follow camera", "나르미  V", Pale, Teal, 16, game.ChangeView).GetComponent<RectTransform>(), 144, 14, 124, 54);
+            BottomLeft(nav, 24, 23, 164, 76);
+            viewButton = Button(nav, "Switch view", "나르미  V", Pale, Teal, 16, game.ChangeView, out viewButtonText);
+            TopLeft(viewButton.GetComponent<RectTransform>(), 12, 11, 140, 54);
 
             var milestone = Panel(main, "Stage progress", Ink);
             BottomRight(milestone, 24, 23, 402, 82);
@@ -173,12 +173,9 @@ namespace NaraTycoon
             driveValue = Short(driveHUD, "", 15, White, false, 18, 46, 476, 31);
             Short(driveHUD, "도착 시 하역   ·   Space 제동", 13, Color.Lerp(White, Pale, .45f), false, 18, 78, 462, 23);
 
-            toast = Panel(canvas, "Event toast", Teal);
-            AnchorTopCenter(toast, 0, 108, 460, 52);
-            toast.GetComponent<UI.Image>().raycastTarget = false;
-            notice = Label(toast, "", 17, White, true, TextAnchor.MiddleCenter);
-            Stretch(notice.rectTransform, 15, 15, 0, 0);
-            toast.gameObject.SetActive(false);
+            toast = Make("Notification feed", canvas);
+            Stretch(toast);
+            BuildTownEvent(main);
             overlay = Make("Game screens", canvas);
             Stretch(overlay);
             BuildTutorialHud();
@@ -187,7 +184,7 @@ namespace NaraTycoon
         internal void SetMode(NaraGame.ScreenState state)
         {
             CloseModal();
-            if (state is NaraGame.ScreenState.Title or NaraGame.ScreenState.Ended) toast.gameObject.SetActive(false);
+            if (state is NaraGame.ScreenState.Title or NaraGame.ScreenState.Ended) ClearNotices();
             if (state == NaraGame.ScreenState.Title) growthUntil = 0;
             ResetChildren(overlay);
             main.gameObject.SetActive(state == NaraGame.ScreenState.Playing || state == NaraGame.ScreenState.Paused);
@@ -256,7 +253,7 @@ namespace NaraTycoon
         void ShowEnding()
         {
             if (!Model.CanEnd || game.Driving) return;
-            var panel = OpenModal("엔딩 보기", "도시 행복도 5,000을 달성했습니다. 솔빛시의 엔딩을 보시겠습니까?", 630, 221);
+            var panel = OpenModal("엔딩 보기", $"도시 행복도 {Procurement.Goal:N0}을 달성했습니다. 솔빛시의 엔딩을 보시겠습니까?", 630, 221);
             TopLeft(Button(panel, "Keep playing", "계속 운영", Pale, Teal, 17, CloseModal).GetComponent<RectTransform>(), 29, 135, 272, 48);
             TopLeft(Button(panel, "Finish city", "엔딩 시작", Teal, White, 17, game.OpenEnding).GetComponent<RectTransform>(), 317, 135, 284, 48);
         }
@@ -297,6 +294,7 @@ namespace NaraTycoon
         RectTransform OpenModal(string title, string subtitle, float width, float height)
         {
             if (modal != null) HideAndDestroy(modal.gameObject);
+            inspectionChallenge = null;
             modalId = -1;
             modalOrder = null;
             modal = Make("Modal · " + title, canvas);
@@ -330,7 +328,7 @@ namespace NaraTycoon
             modal = null;
             modalOrder = null;
             modalId = -1;
-            inspectionStatus = null;
+            inspectionChallenge = null;
             game.CloseInspection();
         }
 
@@ -373,24 +371,23 @@ namespace NaraTycoon
         {
             if (!main.gameObject.activeSelf) return;
             var d = Model.Data;
-            budget.text = $"{d.Budget:N0} 만원";
-            hearts.text = $"{d.Hearts:N0}";
-            happiness.text = $"{d.Happiness:N0}";
+            SetStatValue(budget, $"{d.Budget:N0} 만원");
+            SetStatValue(hearts, $"{d.Hearts:N0}");
+            SetStatValue(happiness, $"{d.Happiness:N0}");
             RefreshGrowth(d.Happiness);
-            progress.rectTransform.sizeDelta = new Vector2(Mathf.Max(2, 98 * Mathf.Clamp01((float)d.Happiness / Procurement.Goal)), 3);
             speedText.text = $"{Model.TimeMultiplier:0.#}배속";
             bool night = CityWorld.Night(d.Clock);
             bool twilight = !night && CityPresentation.TwilightWeight(d.Clock) > .24f;
-            int hour = (7 + Mathf.FloorToInt(d.Clock % 174 / 174 * 24)) % 24;
-            int minutes = Mathf.FloorToInt(d.Clock % 174 / 174 * 24 * 60) % 60;
-            day.text = $"솔빛시   {hour:00}:{minutes:00}  {(night ? "밤" : twilight ? "노을" : "낮")}";
+            float phase = d.Clock % CityPresentation.DaySeconds / CityPresentation.DaySeconds;
+            int hour = (7 + Mathf.FloorToInt(phase * 24)) % 24;
+            int minutes = Mathf.FloorToInt(phase * 24 * 60) % 60;
+            day.text = $"{CityWorld.SeasonName(d.Clock)}   {hour:00}:{minutes:00}  {(night ? "밤" : twilight ? "노을" : "낮")}";
             clockDot.color = night ? CityWorld.ColorOf("879ABF") : twilight ? CityWorld.ColorOf("DB9772") : Gold;
             stage.text = $"{Model.Stage + 1:D2} / 03   {Procurement.Stages[Model.Stage]}";
             endingButton.gameObject.SetActive(Model.CanEnd && !game.Driving);
             endingButtonText.text = d.Ended ? "엔딩 다시 보기" : "엔딩 보기";
             next.text = Model.CanEnd ? $"도시 행복도 {d.Happiness:N0}   ·   납품 {Model.Completed:N0}건" :
                 $"도시 행복도 {d.Happiness:N0} / {Procurement.Goal:N0}    ·    납품 {Model.Completed:N0}건";
-            if (toast.gameObject.activeSelf && Time.unscaledTime >= toastUntil) toast.gameObject.SetActive(false);
             bool showDrive = game.Driving;
             bool showBuilding = !showDrive && contextSite.HasValue;
             desk.gameObject.SetActive(showBuilding);
@@ -548,7 +545,7 @@ namespace NaraTycoon
                 Short(row, owner, 13, Muted, false, 62, 8, 200, 23);
                 Short(row, c.Item, 18, Ink, true, 62, 30, 282, 29);
                 if (order.Special) Short(row, "특별 조달", 12, Rose, true, 270, 8, 78, 23);
-                Short(row, $"하트 +{order.Reward}", 13, Rose, true, 265, 62, 82, 21);
+                Short(row, $"하트 +{Model.HeartReward(id)}", 13, Rose, true, 265, 62, 82, 21);
                 orderTimers.Add((id, Short(row, Status(id), 13, Teal, true, 62, 62, 201, 21)));
             }
             var bg = Panel(detail, "Task action", Pale);
@@ -657,9 +654,9 @@ namespace NaraTycoon
             BindOrderModal(id);
             Short(panel, $"수량 {c.Quantity}개    ·    예산 상한 {c.Limit}만원", 22, Ink, true, 31, 128, 632, 48);
             Short(panel, $"품질 {Model.RequiredQuality(id)}점 이상    ·    납기 {c.Deadline}일 이내    ·    참가자격 필수", 18, Teal, false, 32, 181, 630, 38);
-            Short(panel, special ? $"필요 원자재 {Procurement.MaterialName(Model.RequiredMaterial(id))} {Model.RequiredUnits(id)}개" : c.Benefit,
+            Short(panel, Model.RequiredUnits(id) > 0 ? $"비축 지원 예정 · {Procurement.MaterialName(Model.RequiredMaterial(id))} {Model.RequiredUnits(id)}개" : c.Benefit,
                 17, Muted, false, 32, 223, 634, 30);
-            Short(panel, $"납품 보상    하트 +{Model.Data.Orders[id].Reward}    ·    예산 +{Model.BudgetReward(id):N0}만원", 17, special ? Rose : Teal,
+            Short(panel, $"납품 보상    하트 +{Model.HeartReward(id)}    ·    예산 +{Model.BudgetReward(id):N0}만원", 17, special ? Rose : Teal,
                 true, 32, 255, 634, 33);
             TopLeft(Button(panel,"Publish notice",$"입찰공고 게시  ·  접수 {Procurement.BidSeconds}초",Teal,White,19,() =>
             {
@@ -676,7 +673,7 @@ namespace NaraTycoon
             string[] columns = { "기업", "가격", "품질", "납기", "참가자격" };
             int[] x = { 52, 242, 349, 442, 529 };
             for (int i = 0; i < columns.Length; i++) Short(panel, columns[i], 16, Muted, true, x[i], 126, 113, 35);
-            Bid[] bids = Procurement.Offers(id);
+            Bid[] bids = Model.Offers(id);
             for (int i = 0; i < bids.Length; i++)
             {
                 Bid bid = bids[i];
@@ -720,63 +717,6 @@ namespace NaraTycoon
             var dispatch = Button(panel,"Load and drive", "상차 후 직접 운송",Teal,White,18,() => game.StartTrip(id,true));
             dispatch.interactable = missing == 0;
             TopLeft(dispatch.GetComponent<RectTransform>(),29,283,614,52);
-        }
-
-        internal void ShowInspection(int id)
-        {
-            Contract c = Procurement.Catalog[id];
-            Order order = Model.Data.Orders[id];
-            bool defect = Model.HasDefect(id);
-            bool scratch = (id + order.Sample) % 2 == 0;
-            var panel = OpenModal("품질검사", $"{c.Item}  ·  표본 {order.Sample + 1} / {Model.SampleCount(id)}", 854, 500);
-            BindOrderModal(id);
-            var specimen = Panel(panel, "Product specimen", CityWorld.ColorOf("E4E6CE"));
-            TopLeft(specimen, 29, 133, 352, 238);
-            DrawSpecimen(specimen, id, defect && scratch);
-            Short(panel,"검사 기준",20,Teal,true,406,132,412,42);
-            Short(panel,"표면 손상 없음 · 측정값 95~105 mm",17,Muted,false,406,177,410,35);
-            string surface = defect && scratch ? "긁힘 확인" : "이상 없음";
-            int measure = defect && !scratch ? 109 + order.Sample : 98 + (order.Sample * 3 + id) % 7;
-            Short(panel,$"표면 관찰     {surface}",21,Ink,true,406,226,412,37);
-            Short(panel,$"규격 측정     {measure} mm",21,Ink,true,406,269,412,37);
-            inspectionStatus = Short(panel,"두 기준을 모두 충족하면 합격을 선택하세요.",15,Muted,false,406,319,410,48);
-            TopLeft(Button(panel,"Accept sample","합격",Teal,White,20,() => game.Judge(id,false)).GetComponent<RectTransform>(),29,399,389,64);
-            TopLeft(Button(panel,"Request correction","불량 · 보완 요청",Gold,Ink,20,() => game.Judge(id,true)).GetComponent<RectTransform>(),436,399,389,64);
-        }
-
-        static string SampleColor(int id) => id == 0 ? "C49060" : id == 1 ? "9ABAB3" : id == 2 ? "D9A45F" : "78A6A2";
-
-        void DrawSpecimen(RectTransform specimen, int id, bool scratched)
-        {
-            Color paint = CityWorld.ColorOf(SampleColor(id));
-            var deskTop = Panel(specimen,"Specimen main surface",paint);
-            TopLeft(deskTop,55,72,242,70);
-            if (id == 0)
-            {
-                TopLeft(Flat(specimen,Ink).rectTransform, 77,137,13,56);
-                TopLeft(Flat(specimen,Ink).rectTransform, 260,137,13,56);
-                TopLeft(Flat(specimen,CityWorld.ColorOf("E8BB82")).rectTransform,69,86,214,4);
-            }
-            else
-            {
-                TopLeft(Flat(specimen,Ink).rectTransform,65,134,221,12);
-                TopLeft(Panel(specimen,"Gauge",Pale),198,94,69,30);
-                for (int i = 0; i < 4; i++) TopLeft(Flat(specimen,Muted).rectTransform,84+i*14,93,5,27);
-            }
-            if (scratched)
-                for (int i = 0; i < 3; i++)
-                {
-                    var scratch = Flat(specimen, Rose).rectTransform;
-                    TopLeft(scratch,133+i*11,104+i*2,36-i*5,3);
-                    scratch.localRotation = Quaternion.Euler(0,0,32);
-                }
-        }
-
-        internal void FlashInspection(string message, bool error)
-        {
-            if (inspectionStatus == null) return;
-            inspectionStatus.text = message;
-            inspectionStatus.color = error ? Rose : Teal;
         }
 
         void BuildStock()
@@ -880,17 +820,6 @@ namespace NaraTycoon
             return state;
         }
 
-        internal void Toast(string message, bool reward)
-        {
-            if (string.IsNullOrEmpty(message)) return;
-            notice.text = message;
-            notice.color = reward ? Ink : White;
-            toast.GetComponent<UI.Image>().color = reward ? Gold : Teal;
-            toast.SetAsLastSibling();
-            toast.gameObject.SetActive(true);
-            toastUntil = Time.unscaledTime + 4.5f;
-        }
-
         void VolumeSlider(RectTransform parent, string name, float value, float y, Action<float> update)
         {
             Short(parent, name, 16, Ink, true, 31, y, 130, 44);
@@ -943,7 +872,19 @@ namespace NaraTycoon
             var widget = Make(label,parent);
             TopLeft(widget,x,0,w,74);
             Short(widget,label,14,Muted,true,0,7,w,25);
-            return Short(widget,"",24,color,true,0,32,w,29);
+            var value = Short(widget,"",StatValueFontSize,color,true,0,32,w - 3,29);
+            value.horizontalOverflow = HorizontalWrapMode.Overflow;
+            return value;
+        }
+
+        static void SetStatValue(UI.Text label, string value)
+        {
+            if (label.text == value) return;
+            label.text = value;
+            label.fontSize = StatValueFontSize;
+            float width = label.rectTransform.rect.width;
+            while (label.fontSize > 1 && label.preferredWidth > width)
+                label.fontSize--;
         }
 
         static string Minutes(float t) => $"{(int)t / 60:00}:{(int)t % 60:00}";

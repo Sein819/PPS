@@ -71,10 +71,6 @@ namespace NaraTycoon
         {
             var stage = presentation.GrowthDistrict(0);
             if (stage.Find("솔빛 시민정원") != null) return;
-            foreach (Transform terrain in root.Find("Terrain and waterfront"))
-                if (Mathf.Approximately(terrain.localScale.x, 380))
-                    terrain.localScale = new Vector3(630, terrain.localScale.y, 630);
-
             var park = DistrictPlatform(stage, "솔빛 시민정원", 59, -47.5f, 32, 14, "82AD84");
             Box(park, 0, .11f, 2.1f, 31.8f, .2f, 2.6f, "DCCCB2");
             Box(park, 0, .10f, -.8f, 5.8f, .21f, 9.0f, "D6DCC7");

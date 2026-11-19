@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using MoreMountains.Feedbacks;
+using Unity.Cinemachine;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -20,7 +21,7 @@ namespace NaraTycoon
         Trip manual;
         Procurement model;
         float refresh, saveClock, dustClock;
-        bool track, changed;
+        bool track, overviewSelected, changed;
         Site? focusedSite;
         const float EnterDistance = 2f;
         const float ExitDistance = 3f;
@@ -30,6 +31,7 @@ namespace NaraTycoon
         float endingTime;
         int endingShot;
         bool endingSummary;
+        TownEvent lastTownEvent;
         MMF_Player statusPulse;
         public ScreenState Mode { get; private set; }
         public Procurement Model => model;
@@ -88,6 +90,7 @@ namespace NaraTycoon
         public void Begin(bool resume)
         {
             model = new Procurement(resume ? ReadSave() : null);
+            lastTownEvent = TownEvent.None;
             model.Changed = _ => changed = true;
             model.Notice = OnNotice;
             model.Dispatch = Dispatch;
@@ -148,6 +151,7 @@ namespace NaraTycoon
         void SetMode(ScreenState mode)
         {
             Mode = mode;
+            if (mode is ScreenState.Title or ScreenState.Ended) city.UpdateTownEventVisuals(TownEvent.None, 0);
             ApplyTimeScale();
             audio.Duck(mode == ScreenState.Paused);
             hud.SetMode(mode);
@@ -198,6 +202,7 @@ namespace NaraTycoon
             city.PreviewEndingDevelopment(shot, sceneClock);
             city.UpdateEndingCamera(shot, shotTime);
             city.ApplyDay(sceneClock);
+            city.UpdateSeason(model.Data.Clock, delta);
             hud.UpdateEndingFilm(shot, shotTime);
             if (shot == endingShot) return;
             endingShot = shot;
@@ -261,16 +266,24 @@ namespace NaraTycoon
         {
             if (Driving) return;
             track = false;
+            overviewSelected = false;
             focusedSite = site;
             city.TrackPlayer(false);
             city.Focus(site);
         }
 
+        internal bool ViewTargetsOverview => track || focusedSite.HasValue || city.IsGrowthFocused;
+
         internal void ChangeView()
         {
             if (Driving) return;
-            if (track) Focus(null);
-            else FollowPlayer();
+            if (!ViewTargetsOverview)
+            {
+                FollowPlayer();
+                return;
+            }
+            Focus(null);
+            overviewSelected = true;
         }
 
         internal void ShowCityGrowth()
@@ -279,12 +292,14 @@ namespace NaraTycoon
             track = false;
             focusedSite = null;
             city.TrackPlayer(false);
+            overviewSelected = false;
             city.FocusGrowth(cityLevel);
         }
 
         void FollowPlayer()
         {
             track = true;
+            overviewSelected = false;
             focusedSite = null;
             city.Focus(null);
             city.TrackPlayer(true);
@@ -342,30 +357,25 @@ namespace NaraTycoon
         {
             if (model.Data.Orders[id].Step != Step.Inspect || !RequireVisit(model.Supplier(id))) return;
             examining = id;
-            hud.ShowInspection(id);
+            hud.ShowInspectionChallenge(id);
         }
 
         internal void CloseInspection() => examining = -1;
 
-        internal void Judge(int id, bool reject)
+        internal void FinishInspectionMeasurement(int id)
         {
-            if (!RequireVisit(model.Supplier(id))) return;
-            if (!model.Inspect(id, reject))
-            {
-                hud.FlashInspection("판정을 다시 확인하세요. 제품의 상태와 측정값을 살펴보세요.", true);
-                audio.Error();
-                return;
-            }
+            if (examining != id || !model.CompleteInspection(id)) return;
             city.Burst(city.Dock(model.Supplier(id)) + Vector3.up, 11);
-            audio.Confirm();
-            if (model.Data.Orders[id].Step == Step.Inspect)
-            {
-                hud.ShowInspection(id);
-                hud.FlashInspection(reject ? "불량 표시를 기록했습니다." : "합격을 기록했습니다.", false);
-            }
-            else
-                hud.CloseModal();
+            hud.CloseModal();
             Save();
+        }
+
+        internal void InspectionCue(int combo)
+        {
+            if (combo == 0) audio.Error();
+            else if (combo == 1) audio.Click();
+            else if (combo == 2) audio.Confirm();
+            else audio.Reward();
         }
 
         internal void StartTrip(int id, bool supply)
@@ -470,6 +480,7 @@ namespace NaraTycoon
                 int before = model.Data.Happiness;
                 int deliveries = model.Completed;
                 model.Tick(dt, examining, FreeTrucks(false), FreeTrucks(true));
+                ShowTownEvent();
                 if (model.Data.Happiness > before && model.Completed == deliveries)
                 {
                     statusPulse.PlayFeedbacks();
@@ -495,6 +506,7 @@ namespace NaraTycoon
             float elapsed = Mode == ScreenState.Title ? 27f : model.Data.Clock;
             city.ApplyDay(elapsed);
             city.UpdateCamera(Driving ? manual.Truck : city.Hero, Mode == ScreenState.Title, Time.unscaledDeltaTime);
+            city.UpdateSeason(Mode == ScreenState.Title ? 0 : model.Data.Clock, Time.unscaledDeltaTime);
             refresh -= Time.unscaledDeltaTime;
             if (changed || refresh <= 0)
             {
@@ -502,7 +514,23 @@ namespace NaraTycoon
                 changed = false;
                 refresh = .19f;
             }
-            hud.UpdateMarkers();
+            hud.UpdateOperations(Time.unscaledDeltaTime, keyboard);
+        }
+
+        void OnEnable() => CinemachineCore.CameraUpdatedEvent.AddListener(UpdateCameraHud);
+        void OnDisable() => CinemachineCore.CameraUpdatedEvent.RemoveListener(UpdateCameraHud);
+
+        void UpdateCameraHud(CinemachineBrain brain)
+        {
+            if (brain.OutputCamera == city.Camera) hud?.UpdateMarkers();
+        }
+
+        void ShowTownEvent()
+        {
+            var active = model.ActiveEvent;
+            if (active != lastTownEvent && active != TownEvent.None) audio.Reward();
+            lastTownEvent = active;
+            city.UpdateTownEventVisuals(active, model.Data.Clock);
         }
 
         static Vector2 InputVector(Keyboard kb)
@@ -553,7 +581,7 @@ namespace NaraTycoon
             }
             bool leftBuilding = previousSite.HasValue && !AtSite;
             if (leftBuilding) hud.LeaveSite();
-            if (!track && (leftBuilding || (moving && (!focusedSite.HasValue ||
+            if (!track && !overviewSelected && (leftBuilding || (moving && (!focusedSite.HasValue ||
                 city.SiteDistance(focusedSite.Value, position) > ExitDistance))))
                 FollowPlayer();
             return AtSite;

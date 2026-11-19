@@ -65,12 +65,17 @@ namespace NaraTycoon
         static readonly Rect DrivingArea = Rect.MinMaxRect(-53, -39, 77, 39);
         static readonly Vector3 FollowOffset = new(0, 14, -12.5f);
         static readonly Vector3 FollowDirection = Vector3.forward * 1.3f - FollowOffset;
+        const float MaxCameraDistance = 140f;
+        const float CameraFarClip = 950f;
+        const float SeaSize = 1600f;
         Material runtimeGlow;
         TransportGuide transportGuide;
         Site? focus;
         Vector3? growthFocus;
-        Transform lastFollow;
-        Vector3 followPosition, followVelocity;
+        Vector3 viewTarget, viewVelocity;
+        float zoomVelocity;
+        float trackTransition;
+        bool trackingPlayer, cameraInitialized;
         readonly Vector2[] siteHalfExtents = new Vector2[Names.Length];
 
         internal Transform Hero => hero;
@@ -89,7 +94,9 @@ namespace NaraTycoon
         {
             InstallCitizenModels();
             var brain = camera.GetComponent<CinemachineBrain>();
-            brain.DefaultBlend = new CinemachineBlendDefinition(CinemachineBlendDefinition.Styles.EaseInOut, .95f);
+            brain.UpdateMethod = CinemachineBrain.UpdateMethods.LateUpdate;
+            camera.GetUniversalAdditionalCameraData().antialiasing = AntialiasingMode.SubpixelMorphologicalAntiAliasing;
+            travelCamera.Priority = 0;
             for (int i = 0; i < Names.Length; i++)
             {
                 Vector3 center = Center((Site)i);
@@ -195,11 +202,11 @@ namespace NaraTycoon
             camera = cameraObject.gameObject.AddComponent<Camera>();
             camera.allowHDR = true;
             camera.clearFlags = CameraClearFlags.SolidColor;
-            camera.farClipPlane = 280;
+            camera.farClipPlane = CameraFarClip;
             cameraObject.gameObject.AddComponent<AudioListener>();
             var cameraData = camera.GetUniversalAdditionalCameraData();
             cameraData.renderPostProcessing = true;
-            cameraData.antialiasing = AntialiasingMode.FastApproximateAntialiasing;
+            cameraData.antialiasing = AntialiasingMode.SubpixelMorphologicalAntiAliasing;
             var brain = cameraObject.gameObject.AddComponent<CinemachineBrain>();
             brain.LensModeOverride = new CinemachineBrain.LensModeOverrideSettings
             {
@@ -313,7 +320,7 @@ namespace NaraTycoon
             lens.OrthographicSize = size;
             lens.FieldOfView = fov;
             lens.NearClipPlane = .1f;
-            lens.FarClipPlane = 280;
+            lens.FarClipPlane = CameraFarClip;
             active.Lens = lens;
             active.Priority = priority;
             return active;
@@ -342,31 +349,38 @@ namespace NaraTycoon
             growthFocus = GrowthLandmark(level);
         }
 
+        internal bool IsGrowthFocused => growthFocus.HasValue;
+
         internal void UpdateCamera(Transform follow, bool title, float dt)
         {
+            bool tracking = !title && trackingPlayer && follow != null;
             bool showingDevelopment = !title && growthFocus.HasValue;
-            Vector3 target = title ? new Vector3(7, 4, 6) : showingDevelopment ? growthFocus.Value + new Vector3(4, 2, 0) :
+            Vector3 target = tracking ? V(follow.position.x, follow.position.z + 1.3f) :
+                title ? new Vector3(7, 4, 6) :
+                showingDevelopment ? growthFocus.Value + new Vector3(4, 2, 0) :
                 focus.HasValue ? Center(focus.Value) + V(6,0) : new Vector3(13, 0, 14);
-            Vector3 lookFrom = showingDevelopment ? target + overview * .61f :
-                focus.HasValue && !title ? target - FollowDirection * 2.2f : overview + target;
-            cameraRig.position = Vector3.Lerp(cameraRig.position, lookFrom, 1 - Mathf.Exp(-4 * dt));
-            cameraRig.rotation = Quaternion.Slerp(cameraRig.rotation, Quaternion.LookRotation(target - lookFrom), 1 - Mathf.Exp(-4 * dt));
-            var lens = cityCamera.Lens;
+            var rotation = Quaternion.LookRotation(tracking || focus.HasValue && !title ? FollowDirection : -overview);
             int level = presentation != null ? presentation.CurrentLevel : 0;
             float mapSize = level >= 5 ? 81 : level >= 2 ? 72 : level == 1 ? 65 : 59;
-            float size = title ? 55 : showingDevelopment ? (level >= 5 ? 35 : 27) : focus.HasValue ? 16 : mapSize;
-            lens.OrthographicSize = Mathf.Lerp(lens.OrthographicSize, size, 1 - Mathf.Exp(-4 * dt));
+            float size = tracking ? travelCamera.Lens.OrthographicSize : title ? 55 :
+                showingDevelopment ? (level >= 5 ? 35 : 27) : focus.HasValue ? 16 : mapSize;
+            var lens = cityCamera.Lens;
+            trackTransition = Mathf.MoveTowards(trackTransition, 0, dt * 2);
+            float followDamping = tracking ? Mathf.Lerp(.11f, .24f, trackTransition) : .24f;
+            viewTarget = cameraInitialized ? Vector3.SmoothDamp(viewTarget, target, ref viewVelocity, followDamping, Mathf.Infinity, dt) : target;
+            if (cameraInitialized) rotation = Quaternion.Slerp(cameraRig.rotation, rotation, 1 - Mathf.Exp(-4.5f * dt));
+            lens.OrthographicSize = cameraInitialized ?
+                Mathf.SmoothDamp(lens.OrthographicSize, size, ref zoomVelocity, .28f, Mathf.Infinity, dt) : size;
+            cameraInitialized = true;
+            FrameCamera(viewTarget, rotation, lens);
+        }
+
+        void FrameCamera(Vector3 target, Quaternion rotation, LensSettings lens)
+        {
+            float distance = Mathf.Min(MaxCameraDistance, 46f + lens.OrthographicSize * 1.08f);
+            cameraRig.SetPositionAndRotation(target - rotation * Vector3.forward * distance, rotation);
+            lens.FarClipPlane = CameraFarClip;
             cityCamera.Lens = lens;
-            if (follow == null) return;
-            Vector3 flat = new Vector3(follow.position.x, 0, follow.position.z);
-            if (lastFollow != follow)
-            {
-                lastFollow = follow;
-                followPosition = flat;
-                followVelocity = Vector3.zero;
-            }
-            followPosition = Vector3.SmoothDamp(followPosition, flat, ref followVelocity, .13f, Mathf.Infinity, dt);
-            travelRig.SetPositionAndRotation(followPosition + FollowOffset, Quaternion.LookRotation(FollowDirection));
         }
 
         internal void PreviewEndingDevelopment(int shot, float sceneClock)
@@ -391,13 +405,19 @@ namespace NaraTycoon
                 _ => new Vector3(-58, 66, -76)
             };
             offset = Quaternion.Euler(0, Mathf.Lerp(-8, 8, progress), 0) * offset;
-            cameraRig.SetPositionAndRotation(target + offset, Quaternion.LookRotation(-offset));
+            viewTarget = target;
+            viewVelocity = Vector3.zero;
+            zoomVelocity = 0;
             var lens = cityCamera.Lens;
             lens.OrthographicSize = (shot == 2 ? 87 : shot == 1 ? 28 : 23) - progress * 2;
-            cityCamera.Lens = lens;
+            FrameCamera(target, Quaternion.LookRotation(-offset), lens);
         }
 
-        internal void TrackPlayer(bool track) => travelCamera.Priority = track ? 20 : 0;
+        internal void TrackPlayer(bool track)
+        {
+            if (track && !trackingPlayer) trackTransition = 1;
+            trackingPlayer = track;
+        }
 
         internal void AnimateHero(bool moving)
         {
@@ -545,7 +565,11 @@ namespace NaraTycoon
             foreach (var dash in routeDots) dash.SetActive(false);
         }
 
-        void OnDestroy() => transportGuide?.Dispose();
+        void OnDestroy()
+        {
+            transportGuide?.Dispose();
+            DisposeSeasons();
+        }
 
 #if UNITY_EDITOR
         void AddSecondVehicles()
@@ -701,7 +725,7 @@ namespace NaraTycoon
             var landscape = Node("Trees and foothills", root);
             Box(terrain, 12, -2.1f, 0, 135, 3.5f, 83, "7FA894");
             Box(terrain, 12, -.4f, 0, 134, .73f, 82, "A8C98E");
-            Box(terrain, 0, -4.0f, 0, 380, .4f, 380, "9DD4D5");
+            Box(terrain, 0, -4.0f, 0, SeaSize, .4f, SeaSize, "9DD4D5");
             for (int x = -48; x <= 72; x += 24) AddVerticalStreet(roads, x);
             for (int sign = -1; sign <= 1; sign += 2)
             {

@@ -150,7 +150,7 @@ namespace NaraTycoon
             else if (modalId == 0 && step == Step.Evaluate)
             {
                 string button = null;
-                foreach (var bid in Procurement.Offers(0))
+                foreach (var bid in Model.Offers(0))
                     if (Model.Ineligible(0, bid).Length == 0)
                     {
                         button = "Select " + bid.Company;
@@ -160,7 +160,7 @@ namespace NaraTycoon
             }
             else if (modalId == 0 && step == Step.Inspect)
             {
-                Tip(first + " · 품질검사", "긁힘이 없고 95~105 mm이면 합격입니다. 기준을 벗어나면 보완을 요청하세요.", "Accept sample", "Request correction");
+                ClearTutorial();
             }
             else if (active != Tab.Contracts)
             {

@@ -74,15 +74,17 @@ namespace NaraTycoon
             return position;
         }
 
+        internal const float DaySeconds = 174f;
+
         internal static float NightWeight(float elapsed)
         {
-            float phase = elapsed % 174f / 174f;
+            float phase = elapsed % DaySeconds / DaySeconds;
             return Mathf.SmoothStep(0, 1, Mathf.InverseLerp(.49f, .64f, phase)) *
                 (1 - Mathf.SmoothStep(0, 1, Mathf.InverseLerp(.86f, 1, phase)));
         }
 
         internal static float TwilightWeight(float time) =>
-            Mathf.Max(0, 1 - Mathf.Abs(time % 174f / 174f - .52f) / .11f);
+            Mathf.Max(0, 1 - Mathf.Abs(time % DaySeconds / DaySeconds - .52f) / .11f);
 
         void Awake()
         {
@@ -116,7 +118,7 @@ namespace NaraTycoon
 
         internal void ApplyAtmosphere(float time, float night, Camera camera, Light sun, Light fill)
         {
-            float phase = time % 174f / 174f;
+            float phase = time % DaySeconds / DaySeconds;
             float twilight = TwilightWeight(time);
             duskGrade.weight = Mathf.SmoothStep(0, 1, twilight) * (1 - night);
             nightGrade.weight = night;
