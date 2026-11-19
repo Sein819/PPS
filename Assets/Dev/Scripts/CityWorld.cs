@@ -12,6 +12,7 @@ namespace NaraTycoon
         struct Citizen
         {
             public Transform Root, Left, Right;
+            [System.NonSerialized] public Animation Run;
             public Vector3 Start, End;
             public Site Site;
             public float Phase;
@@ -86,6 +87,7 @@ namespace NaraTycoon
 
         void Awake()
         {
+            InstallCitizenModels();
             var brain = camera.GetComponent<CinemachineBrain>();
             brain.DefaultBlend = new CinemachineBlendDefinition(CinemachineBlendDefinition.Styles.EaseInOut, .95f);
             for (int i = 0; i < Names.Length; i++)
@@ -94,6 +96,68 @@ namespace NaraTycoon
                 var midpoint = new Vector2(center.x, center.z);
                 Rect footprint = buildings.Find(bounds => bounds.Contains(midpoint));
                 siteHalfExtents[i] = footprint.width > 0 ? footprint.size * .5f : Vector2.one * 2.5f;
+            }
+        }
+
+        void InstallCitizenModels()
+        {
+            var models = new[] { Resources.Load<GameObject>("Citizens/Male"), Resources.Load<GameObject>("Citizens/Female") };
+            var shader = Shader.Find("Universal Render Pipeline/Lit");
+            if (shader == null) return;
+            var materials = new Dictionary<Material, Material>();
+            var random = new System.Random();
+            Color[] hairColors = { ColorOf("211B1A"), ColorOf("35251F"), ColorOf("4C352B"), ColorOf("674733"), ColorOf("815B41") };
+            Color[] tops = { ColorOf("597F9B"), ColorOf("C28F47"), ColorOf("A96068"), ColorOf("62816D"), ColorOf("827499"), ColorOf("C9AB8C") };
+            Color[] trousers = { ColorOf("44596D"), ColorOf("8B735F"), ColorOf("56525A"), ColorOf("6C7765"), ColorOf("B0997B") };
+            int first = random.Next(models.Length);
+            for (int i = 0; i < citizens.Count; i++)
+            {
+                var citizen = citizens[i];
+                var model = models[(i + first) % models.Length];
+                if (citizen.Root == null || model == null || model.GetComponent<Animation>()?.clip == null) continue;
+                var hair = hairColors[random.Next(hairColors.Length)];
+                var top = tops[random.Next(tops.Length)];
+                var pants = trousers[random.Next(trousers.Length)];
+                for (int child = 0; child < citizen.Root.childCount; child++)
+                    citizen.Root.GetChild(child).gameObject.SetActive(false);
+                var visual = Instantiate(model, citizen.Root, false);
+                visual.transform.localScale = Vector3.one * .60f;
+                var tint = new MaterialPropertyBlock();
+                foreach (var renderer in visual.GetComponentsInChildren<Renderer>(true))
+                {
+                    var slots = renderer.sharedMaterials;
+                    for (int slot = 0; slot < slots.Length; slot++)
+                    {
+                        var source = slots[slot];
+                        if (source == null) continue;
+                        if (!materials.TryGetValue(source, out var material))
+                        {
+                            material = new Material(shader) { color = source.color };
+                            material.SetFloat("_Smoothness", .23f);
+                            materials.Add(source, material);
+                        }
+                        slots[slot] = material;
+                        Color color = source.name switch
+                        {
+                            "Chestnut brown" or "Espresso brown" => hair,
+                            "Harbor blue knit" or "Marigold knit" => top,
+                            "Blue knit binding" or "Warm knit binding" => Color.Lerp(top, Color.black, .16f),
+                            "Sand chinos" or "Slate denim" => pants,
+                            "Chino hem" or "Denim hem" => Color.Lerp(pants, Color.white, .12f),
+                            _ => material.color
+                        };
+                        tint.SetColor("_BaseColor", color);
+                        renderer.SetPropertyBlock(tint, slot);
+                    }
+                    renderer.sharedMaterials = slots;
+                }
+                citizen.Run = visual.GetComponent<Animation>();
+                citizen.Run.wrapMode = WrapMode.Loop;
+                citizen.Run.playAutomatically = true;
+                citizen.Run.Play();
+                var state = citizen.Run[citizen.Run.clip.name];
+                state.normalizedTime = (float)random.NextDouble();
+                citizens[i] = citizen;
             }
         }
 
@@ -395,6 +459,7 @@ namespace NaraTycoon
                 float walk = (t * .13f + citizen.Phase) % 2;
                 citizen.Root.position = Vector3.Lerp(citizen.Start, citizen.End, Mathf.PingPong(walk, 1));
                 citizen.Root.rotation = Quaternion.LookRotation((citizen.End - citizen.Start) * (walk < 1 ? 1 : -1));
+                if (citizen.Run != null) continue;
                 float stride = Mathf.Sin((t + citizen.Phase) * 11) * 24;
                 citizen.Left.localRotation = Quaternion.Euler(stride, 0, 0);
                 citizen.Right.localRotation = Quaternion.Euler(-stride, 0, 0);

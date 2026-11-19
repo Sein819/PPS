@@ -66,6 +66,7 @@ namespace NaraTycoon.Editor
                 SceneManager.SetActiveScene(scene);
                 var city = scene.GetRootGameObjects().SelectMany(root => root.GetComponentsInChildren<CityWorld>()).Single();
                 configure(city);
+                city.AlignRoadsideProps();
                 PersistMaterials(city);
                 if (!EditorSceneManager.SaveScene(scene)) throw new IOException("Could not save the revised city.");
                 AssetDatabase.SaveAssets();
@@ -124,6 +125,7 @@ namespace NaraTycoon.Editor
             gameObject.AddComponent<NaraGame>().Configure(city, regular, bold, soundtrack);
             PersistAssets(city);
             ConfigureUrbanDistricts(city);
+            city.AlignRoadsideProps();
             PersistMaterials(city);
             if (!EditorSceneManager.SaveScene(scene, GameScene)) throw new IOException("Could not save the NaraTycoon scene.");
             EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(GameScene, true) }

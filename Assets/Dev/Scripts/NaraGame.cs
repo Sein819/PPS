@@ -465,7 +465,7 @@ namespace NaraTycoon
                 if (manual != null)
                     MoveManual(hud.HasModal ? Vector2.zero : InputVector(keyboard), keyboard != null && keyboard.spaceKey.isPressed, movement);
                 else
-                    MoveHero(hud.HasModal ? Vector2.zero : InputVector(keyboard), keyboard != null && keyboard.leftShiftKey.isPressed, movement);
+                    MoveHero(hud.HasModal ? Vector2.zero : InputVector(keyboard), movement);
                 MoveWorkers(movement);
                 int before = model.Data.Happiness;
                 int deliveries = model.Completed;
@@ -513,12 +513,12 @@ namespace NaraTycoon
                 (kb.wKey.isPressed || kb.upArrowKey.isPressed ? 1 : 0) - (kb.sKey.isPressed || kb.downArrowKey.isPressed ? 1 : 0));
         }
 
-        void MoveHero(Vector2 input, bool sprint, float dt)
+        void MoveHero(Vector2 input, float dt)
         {
             Vector3 direction = WorldDirection(input);
             var pos = city.Hero.position;
             var previous = pos;
-            Vector3 shift = direction * (sprint ? 11 : 7) * dt;
+            Vector3 shift = direction * 11f * dt;
             Slide(ref pos, shift, .24f);
             pos.y = .10f;
             city.Hero.position = pos;
