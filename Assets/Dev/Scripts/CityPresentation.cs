@@ -96,11 +96,13 @@ namespace NaraTycoon
             }
 
             facadePaint = new MaterialPropertyBlock();
+            var windowShader = Resources.Load<Shader>("WindowGlow");
             activeGlow = new Material[windows.Length];
             for (int i = 0; i < windows.Length; i++)
             {
                 activeGlow[i] = new Material(windows[i].Material);
-                activeGlow[i].EnableKeyword("_EMISSION");
+                activeGlow[i].shader = windowShader;
+                activeGlow[i].SetColor(Emission, Color.black);
                 foreach (Renderer surface in windows[i].Surfaces) surface.sharedMaterial = activeGlow[i];
             }
 

@@ -173,6 +173,7 @@ namespace NaraTycoon
             var mat = new Material(Material(dayColor)) { name = name };
             mat.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
             mat.EnableKeyword("_EMISSION");
+            mat.SetColor("_EmissionColor", ColorOf(nightColor) * intensity);
             foreach (var surface in surfaces) surface.sharedMaterial = mat;
             return new CityPresentation.Glow { Material = mat, Surfaces = surfaces.ToArray(), NightColor = ColorOf(nightColor), Brightness = intensity };
         }
