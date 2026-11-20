@@ -23,6 +23,54 @@ namespace NaraTycoon
         readonly List<Light> avenueLights = new();
         readonly List<CityPresentation.Traffic> vehicles = new();
 
+        public int AlignRoadsideProps()
+        {
+            var lanes = new List<Bounds>();
+            foreach (var owner in new[] { root.Find("Roads and crosswalks"), presentation?.transform.Find("도로 표시와 보도") })
+            {
+                if (owner == null) continue;
+                foreach (Transform part in owner)
+                    if (Mathf.Approximately(part.localScale.x, 6.3f) || Mathf.Approximately(part.localScale.z, 6.35f) ||
+                        Mathf.Approximately(part.localScale.z, 6.3f))
+                        if (part.TryGetComponent<Renderer>(out var surface)) lanes.Add(surface.bounds);
+            }
+
+            int moved = 0;
+            foreach (var prop in root.GetComponentsInChildren<Transform>(true))
+            {
+                if (prop.name is not ("Street tree" or "가로등" or "중앙 버스 쉼터")) continue;
+                var parts = prop.GetComponentsInChildren<MeshRenderer>(true);
+                if (parts.Length == 0) continue;
+                var bounds = parts[0].bounds;
+                foreach (var part in parts) bounds.Encapsulate(part.bounds);
+                if (!lanes.Exists(lane => OverlapsRoad(bounds, lane))) continue;
+                var best = Vector3.zero;
+                float distance = float.PositiveInfinity;
+                foreach (var lane in lanes)
+                {
+                    if (!OverlapsRoad(bounds, lane)) continue;
+                    foreach (var offset in new[] {
+                        V(lane.min.x - bounds.max.x - .12f, 0), V(lane.max.x - bounds.min.x + .12f, 0),
+                        V(0, lane.min.z - bounds.max.z - .12f), V(0, lane.max.z - bounds.min.z + .12f) })
+                    {
+                        if (offset.sqrMagnitude >= distance) continue;
+                        var shifted = bounds;
+                        shifted.center += offset;
+                        if (lanes.Exists(other => OverlapsRoad(shifted, other))) continue;
+                        best = offset;
+                        distance = offset.sqrMagnitude;
+                    }
+                }
+                if (best == Vector3.zero) continue;
+                prop.position += best;
+                moved++;
+            }
+            return moved;
+        }
+
+        static bool OverlapsRoad(Bounds prop, Bounds lane) => prop.min.x < lane.max.x && prop.max.x > lane.min.x &&
+            prop.min.z < lane.max.z && prop.max.z > lane.min.z;
+
         public void AuthorUrbanDistricts(VolumeProfile day, VolumeProfile dusk, VolumeProfile night)
         {
             LoadPalette();
@@ -125,6 +173,7 @@ namespace NaraTycoon
             var mat = new Material(Material(dayColor)) { name = name };
             mat.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
             mat.EnableKeyword("_EMISSION");
+            mat.SetColor("_EmissionColor", ColorOf(nightColor) * intensity);
             foreach (var surface in surfaces) surface.sharedMaterial = mat;
             return new CityPresentation.Glow { Material = mat, Surfaces = surfaces.ToArray(), NightColor = ColorOf(nightColor), Brightness = intensity };
         }
@@ -142,7 +191,7 @@ namespace NaraTycoon
                     part.localPosition += Vector3.forward * 12.5f;
                     renderer.sharedMaterial = Material(size.x == 134 ? "A2B999" : "718F94");
                 }
-                else if (size.x == 380) renderer.sharedMaterial = Material(River);
+                else if (size.x == SeaSize) renderer.sharedMaterial = Material(River);
             }
             foreach (Transform hill in root.Find("Trees and foothills"))
                 if (hill.name == "Soft foothill") hill.localPosition += Vector3.forward * 39;

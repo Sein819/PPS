@@ -12,6 +12,7 @@ namespace NaraTycoon
         struct Citizen
         {
             public Transform Root, Left, Right;
+            [System.NonSerialized] public Animation Run;
             public Vector3 Start, End;
             public Site Site;
             public float Phase;
@@ -64,12 +65,17 @@ namespace NaraTycoon
         static readonly Rect DrivingArea = Rect.MinMaxRect(-53, -39, 77, 39);
         static readonly Vector3 FollowOffset = new(0, 14, -12.5f);
         static readonly Vector3 FollowDirection = Vector3.forward * 1.3f - FollowOffset;
+        const float MaxCameraDistance = 140f;
+        const float CameraFarClip = 950f;
+        const float SeaSize = 1600f;
         Material runtimeGlow;
         TransportGuide transportGuide;
         Site? focus;
         Vector3? growthFocus;
-        Transform lastFollow;
-        Vector3 followPosition, followVelocity;
+        Vector3 viewTarget, viewVelocity;
+        float zoomVelocity;
+        float trackTransition;
+        bool trackingPlayer, cameraInitialized;
         readonly Vector2[] siteHalfExtents = new Vector2[Names.Length];
 
         internal Transform Hero => hero;
@@ -86,14 +92,79 @@ namespace NaraTycoon
 
         void Awake()
         {
+            InstallCitizenModels();
             var brain = camera.GetComponent<CinemachineBrain>();
-            brain.DefaultBlend = new CinemachineBlendDefinition(CinemachineBlendDefinition.Styles.EaseInOut, .95f);
+            brain.UpdateMethod = CinemachineBrain.UpdateMethods.LateUpdate;
+            camera.GetUniversalAdditionalCameraData().antialiasing = AntialiasingMode.SubpixelMorphologicalAntiAliasing;
+            travelCamera.Priority = 0;
             for (int i = 0; i < Names.Length; i++)
             {
                 Vector3 center = Center((Site)i);
                 var midpoint = new Vector2(center.x, center.z);
                 Rect footprint = buildings.Find(bounds => bounds.Contains(midpoint));
                 siteHalfExtents[i] = footprint.width > 0 ? footprint.size * .5f : Vector2.one * 2.5f;
+            }
+        }
+
+        void InstallCitizenModels()
+        {
+            var models = new[] { Resources.Load<GameObject>("Citizens/Male"), Resources.Load<GameObject>("Citizens/Female") };
+            var shader = Shader.Find("Universal Render Pipeline/Lit");
+            if (shader == null) return;
+            var materials = new Dictionary<Material, Material>();
+            var random = new System.Random();
+            Color[] hairColors = { ColorOf("211B1A"), ColorOf("35251F"), ColorOf("4C352B"), ColorOf("674733"), ColorOf("815B41") };
+            Color[] tops = { ColorOf("597F9B"), ColorOf("C28F47"), ColorOf("A96068"), ColorOf("62816D"), ColorOf("827499"), ColorOf("C9AB8C") };
+            Color[] trousers = { ColorOf("44596D"), ColorOf("8B735F"), ColorOf("56525A"), ColorOf("6C7765"), ColorOf("B0997B") };
+            int first = random.Next(models.Length);
+            for (int i = 0; i < citizens.Count; i++)
+            {
+                var citizen = citizens[i];
+                var model = models[(i + first) % models.Length];
+                if (citizen.Root == null || model == null || model.GetComponent<Animation>()?.clip == null) continue;
+                var hair = hairColors[random.Next(hairColors.Length)];
+                var top = tops[random.Next(tops.Length)];
+                var pants = trousers[random.Next(trousers.Length)];
+                for (int child = 0; child < citizen.Root.childCount; child++)
+                    citizen.Root.GetChild(child).gameObject.SetActive(false);
+                var visual = Instantiate(model, citizen.Root, false);
+                visual.transform.localScale = Vector3.one * .60f;
+                var tint = new MaterialPropertyBlock();
+                foreach (var renderer in visual.GetComponentsInChildren<Renderer>(true))
+                {
+                    var slots = renderer.sharedMaterials;
+                    for (int slot = 0; slot < slots.Length; slot++)
+                    {
+                        var source = slots[slot];
+                        if (source == null) continue;
+                        if (!materials.TryGetValue(source, out var material))
+                        {
+                            material = new Material(shader) { color = source.color };
+                            material.SetFloat("_Smoothness", .23f);
+                            materials.Add(source, material);
+                        }
+                        slots[slot] = material;
+                        Color color = source.name switch
+                        {
+                            "Chestnut brown" or "Espresso brown" => hair,
+                            "Harbor blue knit" or "Marigold knit" => top,
+                            "Blue knit binding" or "Warm knit binding" => Color.Lerp(top, Color.black, .16f),
+                            "Sand chinos" or "Slate denim" => pants,
+                            "Chino hem" or "Denim hem" => Color.Lerp(pants, Color.white, .12f),
+                            _ => material.color
+                        };
+                        tint.SetColor("_BaseColor", color);
+                        renderer.SetPropertyBlock(tint, slot);
+                    }
+                    renderer.sharedMaterials = slots;
+                }
+                citizen.Run = visual.GetComponent<Animation>();
+                citizen.Run.wrapMode = WrapMode.Loop;
+                citizen.Run.playAutomatically = true;
+                citizen.Run.Play();
+                var state = citizen.Run[citizen.Run.clip.name];
+                state.normalizedTime = (float)random.NextDouble();
+                citizens[i] = citizen;
             }
         }
 
@@ -131,11 +202,11 @@ namespace NaraTycoon
             camera = cameraObject.gameObject.AddComponent<Camera>();
             camera.allowHDR = true;
             camera.clearFlags = CameraClearFlags.SolidColor;
-            camera.farClipPlane = 280;
+            camera.farClipPlane = CameraFarClip;
             cameraObject.gameObject.AddComponent<AudioListener>();
             var cameraData = camera.GetUniversalAdditionalCameraData();
             cameraData.renderPostProcessing = true;
-            cameraData.antialiasing = AntialiasingMode.FastApproximateAntialiasing;
+            cameraData.antialiasing = AntialiasingMode.SubpixelMorphologicalAntiAliasing;
             var brain = cameraObject.gameObject.AddComponent<CinemachineBrain>();
             brain.LensModeOverride = new CinemachineBrain.LensModeOverrideSettings
             {
@@ -249,7 +320,7 @@ namespace NaraTycoon
             lens.OrthographicSize = size;
             lens.FieldOfView = fov;
             lens.NearClipPlane = .1f;
-            lens.FarClipPlane = 280;
+            lens.FarClipPlane = CameraFarClip;
             active.Lens = lens;
             active.Priority = priority;
             return active;
@@ -278,34 +349,75 @@ namespace NaraTycoon
             growthFocus = GrowthLandmark(level);
         }
 
+        internal bool IsGrowthFocused => growthFocus.HasValue;
+
         internal void UpdateCamera(Transform follow, bool title, float dt)
         {
+            bool tracking = !title && trackingPlayer && follow != null;
             bool showingDevelopment = !title && growthFocus.HasValue;
-            Vector3 target = title ? new Vector3(7, 4, 6) : showingDevelopment ? growthFocus.Value + new Vector3(4, 2, 0) :
+            Vector3 target = tracking ? V(follow.position.x, follow.position.z + 1.3f) :
+                title ? new Vector3(7, 4, 6) :
+                showingDevelopment ? growthFocus.Value + new Vector3(4, 2, 0) :
                 focus.HasValue ? Center(focus.Value) + V(6,0) : new Vector3(13, 0, 14);
-            Vector3 lookFrom = showingDevelopment ? target + overview * .61f :
-                focus.HasValue && !title ? target - FollowDirection * 2.2f : overview + target;
-            cameraRig.position = Vector3.Lerp(cameraRig.position, lookFrom, 1 - Mathf.Exp(-4 * dt));
-            cameraRig.rotation = Quaternion.Slerp(cameraRig.rotation, Quaternion.LookRotation(target - lookFrom), 1 - Mathf.Exp(-4 * dt));
-            var lens = cityCamera.Lens;
+            var rotation = Quaternion.LookRotation(tracking || focus.HasValue && !title ? FollowDirection : -overview);
             int level = presentation != null ? presentation.CurrentLevel : 0;
             float mapSize = level >= 5 ? 81 : level >= 2 ? 72 : level == 1 ? 65 : 59;
-            float size = title ? 55 : showingDevelopment ? (level >= 5 ? 35 : 27) : focus.HasValue ? 16 : mapSize;
-            lens.OrthographicSize = Mathf.Lerp(lens.OrthographicSize, size, 1 - Mathf.Exp(-4 * dt));
-            cityCamera.Lens = lens;
-            if (follow == null) return;
-            Vector3 flat = new Vector3(follow.position.x, 0, follow.position.z);
-            if (lastFollow != follow)
-            {
-                lastFollow = follow;
-                followPosition = flat;
-                followVelocity = Vector3.zero;
-            }
-            followPosition = Vector3.SmoothDamp(followPosition, flat, ref followVelocity, .13f, Mathf.Infinity, dt);
-            travelRig.SetPositionAndRotation(followPosition + FollowOffset, Quaternion.LookRotation(FollowDirection));
+            float size = tracking ? travelCamera.Lens.OrthographicSize : title ? 55 :
+                showingDevelopment ? (level >= 5 ? 35 : 27) : focus.HasValue ? 16 : mapSize;
+            var lens = cityCamera.Lens;
+            trackTransition = Mathf.MoveTowards(trackTransition, 0, dt * 2);
+            float followDamping = tracking ? Mathf.Lerp(.11f, .24f, trackTransition) : .24f;
+            viewTarget = cameraInitialized ? Vector3.SmoothDamp(viewTarget, target, ref viewVelocity, followDamping, Mathf.Infinity, dt) : target;
+            if (cameraInitialized) rotation = Quaternion.Slerp(cameraRig.rotation, rotation, 1 - Mathf.Exp(-4.5f * dt));
+            lens.OrthographicSize = cameraInitialized ?
+                Mathf.SmoothDamp(lens.OrthographicSize, size, ref zoomVelocity, .28f, Mathf.Infinity, dt) : size;
+            cameraInitialized = true;
+            FrameCamera(viewTarget, rotation, lens);
         }
 
-        internal void TrackPlayer(bool track) => travelCamera.Priority = track ? 20 : 0;
+        void FrameCamera(Vector3 target, Quaternion rotation, LensSettings lens)
+        {
+            float distance = Mathf.Min(MaxCameraDistance, 46f + lens.OrthographicSize * 1.08f);
+            cameraRig.SetPositionAndRotation(target - rotation * Vector3.forward * distance, rotation);
+            lens.FarClipPlane = CameraFarClip;
+            cityCamera.Lens = lens;
+        }
+
+        internal void PreviewEndingDevelopment(int shot, float sceneClock)
+        {
+            int stage = shot == 0 ? 0 : shot == 1 ? 3 : CityPresentation.MaxLevel;
+            presentation?.UpdateTown(CityPresentation.Threshold(stage), sceneClock);
+        }
+
+        internal void UpdateEndingCamera(int shot, float time)
+        {
+            float progress = Mathf.Clamp01(time / (shot == 2 ? 6f : 5f));
+            Vector3 target = shot switch
+            {
+                0 => Center(Site.School) + new Vector3(4, 4, 2),
+                1 => GrowthLandmark(3) + Vector3.up * 3,
+                _ => new Vector3(10, 3, 12)
+            };
+            Vector3 offset = shot switch
+            {
+                0 => new Vector3(-24, 18, -30),
+                1 => new Vector3(20, 17, -29),
+                _ => new Vector3(-58, 66, -76)
+            };
+            offset = Quaternion.Euler(0, Mathf.Lerp(-8, 8, progress), 0) * offset;
+            viewTarget = target;
+            viewVelocity = Vector3.zero;
+            zoomVelocity = 0;
+            var lens = cityCamera.Lens;
+            lens.OrthographicSize = (shot == 2 ? 87 : shot == 1 ? 28 : 23) - progress * 2;
+            FrameCamera(target, Quaternion.LookRotation(-offset), lens);
+        }
+
+        internal void TrackPlayer(bool track)
+        {
+            if (track && !trackingPlayer) trackTransition = 1;
+            trackingPlayer = track;
+        }
 
         internal void AnimateHero(bool moving)
         {
@@ -367,6 +479,7 @@ namespace NaraTycoon
                 float walk = (t * .13f + citizen.Phase) % 2;
                 citizen.Root.position = Vector3.Lerp(citizen.Start, citizen.End, Mathf.PingPong(walk, 1));
                 citizen.Root.rotation = Quaternion.LookRotation((citizen.End - citizen.Start) * (walk < 1 ? 1 : -1));
+                if (citizen.Run != null) continue;
                 float stride = Mathf.Sin((t + citizen.Phase) * 11) * 24;
                 citizen.Left.localRotation = Quaternion.Euler(stride, 0, 0);
                 citizen.Right.localRotation = Quaternion.Euler(-stride, 0, 0);
@@ -452,7 +565,11 @@ namespace NaraTycoon
             foreach (var dash in routeDots) dash.SetActive(false);
         }
 
-        void OnDestroy() => transportGuide?.Dispose();
+        void OnDestroy()
+        {
+            transportGuide?.Dispose();
+            DisposeSeasons();
+        }
 
 #if UNITY_EDITOR
         void AddSecondVehicles()
@@ -608,7 +725,7 @@ namespace NaraTycoon
             var landscape = Node("Trees and foothills", root);
             Box(terrain, 12, -2.1f, 0, 135, 3.5f, 83, "7FA894");
             Box(terrain, 12, -.4f, 0, 134, .73f, 82, "A8C98E");
-            Box(terrain, 0, -4.0f, 0, 380, .4f, 380, "9DD4D5");
+            Box(terrain, 0, -4.0f, 0, SeaSize, .4f, SeaSize, "9DD4D5");
             for (int x = -48; x <= 72; x += 24) AddVerticalStreet(roads, x);
             for (int sign = -1; sign <= 1; sign += 2)
             {

@@ -9,6 +9,10 @@ namespace NaraTycoon
     {
         static readonly string[] Names = { "기초 도시", "시민 정원", "교통 지구", "수변 공원", "스마트 지구", "도심 스카이라인", "솔빛 랜드마크" };
         static readonly int Emission = Shader.PropertyToID("_EmissionColor");
+        static readonly int BaseColor = Shader.PropertyToID("_BaseColor");
+        static readonly string[] WallColors = { "", "E4DEC9", "D0DEE2", "D5E5D9", "BDD7DE", "DAE4E8", "FAE8CF" };
+        static readonly string[] RoofColors = { "", "779B84", "718BA7", "5C9E8D", "3F8F9F", "547992", "DAAB6B" };
+        static readonly string[] GlassColors = { "", "86A8A0", "7F9DBA", "73B6A8", "67C4C8", "88B2D1", "9DBCD2" };
 
         [Serializable]
         public sealed class Glow
@@ -36,6 +40,9 @@ namespace NaraTycoon
         [SerializeField] Glow[] windows;
         [SerializeField] Traffic[] traffic;
         [SerializeField] Rect towerFootprint;
+        [SerializeField] Renderer[] buildingWalls = Array.Empty<Renderer>();
+        [SerializeField] Renderer[] buildingRoofs = Array.Empty<Renderer>();
+        MaterialPropertyBlock facadePaint;
         Material[] activeGlow;
         UniversalRenderPipelineAsset pipeline;
         float originalShadowDistance;
@@ -67,15 +74,17 @@ namespace NaraTycoon
             return position;
         }
 
+        internal const float DaySeconds = 174f;
+
         internal static float NightWeight(float elapsed)
         {
-            float phase = elapsed % 174f / 174f;
+            float phase = elapsed % DaySeconds / DaySeconds;
             return Mathf.SmoothStep(0, 1, Mathf.InverseLerp(.49f, .64f, phase)) *
                 (1 - Mathf.SmoothStep(0, 1, Mathf.InverseLerp(.86f, 1, phase)));
         }
 
         internal static float TwilightWeight(float time) =>
-            Mathf.Max(0, 1 - Mathf.Abs(time % 174f / 174f - .52f) / .11f);
+            Mathf.Max(0, 1 - Mathf.Abs(time % DaySeconds / DaySeconds - .52f) / .11f);
 
         void Awake()
         {
@@ -86,11 +95,14 @@ namespace NaraTycoon
                 pipeline.shadowDistance = Mathf.Max(originalShadowDistance, 148);
             }
 
+            facadePaint = new MaterialPropertyBlock();
+            var windowShader = Resources.Load<Shader>("WindowGlow");
             activeGlow = new Material[windows.Length];
             for (int i = 0; i < windows.Length; i++)
             {
                 activeGlow[i] = new Material(windows[i].Material);
-                activeGlow[i].EnableKeyword("_EMISSION");
+                activeGlow[i].shader = windowShader;
+                activeGlow[i].SetColor(Emission, Color.black);
                 foreach (Renderer surface in windows[i].Surfaces) surface.sharedMaterial = activeGlow[i];
             }
 
@@ -108,7 +120,7 @@ namespace NaraTycoon
 
         internal void ApplyAtmosphere(float time, float night, Camera camera, Light sun, Light fill)
         {
-            float phase = time % 174f / 174f;
+            float phase = time % DaySeconds / DaySeconds;
             float twilight = TwilightWeight(time);
             duskGrade.weight = Mathf.SmoothStep(0, 1, twilight) * (1 - night);
             nightGrade.weight = night;
@@ -144,6 +156,7 @@ namespace NaraTycoon
             {
                 for (int i = 0; i < development.Length; i++) development[i].SetActive(i < level);
                 foreach (var car in traffic) car.Vehicle.gameObject.SetActive(level >= car.Level);
+                UpdateFacadeMaterials(level);
                 currentLevel = level;
             }
             foreach (var car in traffic)
@@ -166,7 +179,36 @@ namespace NaraTycoon
             }
         }
 
+        void UpdateFacadeMaterials(int level)
+        {
+            PaintBuildings(buildingWalls, level == 0 ? Color.white : CityWorld.ColorOf(WallColors[level]), level == 0 ? 0 : .48f);
+            PaintBuildings(buildingRoofs, level == 0 ? Color.white : CityWorld.ColorOf(RoofColors[level]), level == 0 ? 0 : .46f);
+            for (int i = 0; i < windows.Length; i++)
+            {
+                Material source = windows[i].Material;
+                if (!source.name.EndsWith("windows", StringComparison.Ordinal)) continue;
+                Color tint = level == 0 ? source.color : Color.Lerp(source.color, CityWorld.ColorOf(GlassColors[level]), .48f);
+                activeGlow[i].SetColor(BaseColor, tint);
+            }
+        }
+
+        void PaintBuildings(Renderer[] surfaces, Color accent, float blend)
+        {
+            foreach (var surface in surfaces)
+            {
+                surface.GetPropertyBlock(facadePaint);
+                facadePaint.SetColor(BaseColor, Color.Lerp(surface.sharedMaterial.color, accent, blend));
+                surface.SetPropertyBlock(facadePaint);
+            }
+        }
+
 #if UNITY_EDITOR
+        internal void ConfigureFacades(Renderer[] walls, Renderer[] roofs)
+        {
+            buildingWalls = walls;
+            buildingRoofs = roofs;
+        }
+
         internal Transform GrowthDistrict(int index) => development[index].transform;
 
         internal void ConfigureGrowth(GameObject district, GameObject landmark, Vector3[] centers, Glow lights)

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using MoreMountains.Feedbacks;
+using Unity.Cinemachine;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -13,24 +14,31 @@ namespace NaraTycoon
 
         [SerializeField] CityWorld city;
         [SerializeField] Font regular, bold;
+        [SerializeField] AudioClip soundtrack;
         readonly List<Trip> trips = new();
         GameHud hud;
         GameAudio audio;
         Trip manual;
         Procurement model;
         float refresh, saveClock, dustClock;
-        bool track, changed;
+        bool track, overviewSelected, changed;
         Site? focusedSite;
         const float EnterDistance = 2f;
         const float ExitDistance = 3f;
         int examining = -1;
         int cityLevel;
+        const float EndingDuration = 16f;
+        float endingTime;
+        int endingShot;
+        bool endingSummary;
+        TownEvent lastTownEvent;
         MMF_Player statusPulse;
         public ScreenState Mode { get; private set; }
         public Procurement Model => model;
         internal CityWorld City => city;
         internal int Examining => examining;
         internal bool Driving => manual != null;
+        internal bool DrivingOrder(int id) => manual != null && manual.Id == id;
         internal float Speed => manual == null ? 0 : Mathf.Abs(manual.Speed) * 3.6f;
         internal Site Destination => manual == null ? Site.Office : manual.Target;
         internal Vector3 UnloadPoint => manual.Path[^1];
@@ -53,17 +61,18 @@ namespace NaraTycoon
             public float Speed;
         }
 
-        public void Configure(CityWorld world, Font normal, Font heavy)
+        public void Configure(CityWorld world, Font normal, Font heavy, AudioClip music)
         {
             city = world;
             regular = normal;
             bold = heavy;
+            soundtrack = music;
         }
 
         void Awake()
         {
             Application.targetFrameRate = 60;
-            audio = new GameAudio(transform);
+            audio = new GameAudio(transform, soundtrack);
             hud = new GameHud(this, regular, bold);
             statusPulse = gameObject.AddComponent<MMF_Player>();
             statusPulse.AddFeedback(new MMF_Scale
@@ -81,6 +90,7 @@ namespace NaraTycoon
         public void Begin(bool resume)
         {
             model = new Procurement(resume ? ReadSave() : null);
+            lastTownEvent = TownEvent.None;
             model.Changed = _ => changed = true;
             model.Notice = OnNotice;
             model.Dispatch = Dispatch;
@@ -110,7 +120,7 @@ namespace NaraTycoon
                     }
                 }
             }
-            SetMode(model.Data.Ended ? ScreenState.Ended : ScreenState.Playing);
+            SetMode(ScreenState.Playing);
             city.UpdateActivity(model, model.Data.Clock);
             hud.LeaveSite();
             if (Driving)
@@ -118,8 +128,7 @@ namespace NaraTycoon
                 FollowPlayer();
                 city.UpdateTransportGuide(manual.Truck.position, InUnloadZone, 0);
             }
-            else if (Mode == ScreenState.Playing && !UpdateSite(city.Hero.position, false)) FollowPlayer();
-            else if (Mode == ScreenState.Ended) Focus(Site.Plaza);
+            else if (!UpdateSite(city.Hero.position, false)) FollowPlayer();
             if (!resume) hud.Toast("조달청 · 새 조달요청이 도착했습니다.", false);
             Save();
         }
@@ -142,6 +151,7 @@ namespace NaraTycoon
         void SetMode(ScreenState mode)
         {
             Mode = mode;
+            if (mode is ScreenState.Title or ScreenState.Ended) city.UpdateTownEventVisuals(TownEvent.None, 0);
             ApplyTimeScale();
             audio.Duck(mode == ScreenState.Paused);
             hud.SetMode(mode);
@@ -166,11 +176,61 @@ namespace NaraTycoon
         internal void OpenEnding()
         {
             if (Mode != ScreenState.Playing || !model.CanEnd || Driving) return;
-            model.Data.Ended = true;
-            if (!Driving) Focus(Site.Plaza);
-            city.Burst(city.Center(Site.Plaza) + Vector3.up * 2, 68);
-            audio.Reward();
+            AtSite = false;
+            hud.LeaveSite();
+            Focus(null);
+            endingTime = 0;
+            endingShot = -1;
+            endingSummary = false;
             SetMode(ScreenState.Ended);
+            AdvanceEnding(0);
+        }
+
+        void AdvanceEnding(float delta)
+        {
+            if (endingSummary) return;
+            endingTime += delta;
+            if (endingTime >= EndingDuration)
+            {
+                CompleteEnding();
+                return;
+            }
+
+            int shot = endingTime < 5 ? 0 : endingTime < 10 ? 1 : 2;
+            float shotTime = endingTime - shot * 5f;
+            float sceneClock = shot == 0 ? 32f + shotTime : shot == 1 ? 77f + shotTime * 3f : 116f + shotTime * 2f;
+            city.PreviewEndingDevelopment(shot, sceneClock);
+            city.UpdateEndingCamera(shot, shotTime);
+            city.ApplyDay(sceneClock);
+            city.UpdateSeason(model.Data.Clock, delta);
+            hud.UpdateEndingFilm(shot, shotTime);
+            if (shot == endingShot) return;
+            endingShot = shot;
+            if (shot == 2)
+            {
+                city.Burst(city.GrowthLandmark(6) + Vector3.up * 30, 80);
+                city.Burst(city.GrowthLandmark(3) + Vector3.up * 2, 40);
+            }
+            audio.Reward();
+        }
+
+        internal void CompleteEnding()
+        {
+            if (Mode != ScreenState.Ended || endingSummary) return;
+            endingSummary = true;
+            model.Data.Ended = true;
+            city.PreviewEndingDevelopment(2, 132f);
+            city.UpdateEndingCamera(2, 6);
+            city.ApplyDay(132);
+            hud.ShowEndingSummary();
+            Save();
+        }
+
+        internal void ContinueAfterEnding()
+        {
+            if (Mode != ScreenState.Ended || !endingSummary) return;
+            SetMode(ScreenState.Playing);
+            if (!UpdateSite(city.Hero.position, false)) FollowPlayer();
             Save();
         }
 
@@ -206,16 +266,24 @@ namespace NaraTycoon
         {
             if (Driving) return;
             track = false;
+            overviewSelected = false;
             focusedSite = site;
             city.TrackPlayer(false);
             city.Focus(site);
         }
 
+        internal bool ViewTargetsOverview => track || focusedSite.HasValue || city.IsGrowthFocused;
+
         internal void ChangeView()
         {
             if (Driving) return;
-            if (track) Focus(null);
-            else FollowPlayer();
+            if (!ViewTargetsOverview)
+            {
+                FollowPlayer();
+                return;
+            }
+            Focus(null);
+            overviewSelected = true;
         }
 
         internal void ShowCityGrowth()
@@ -224,12 +292,14 @@ namespace NaraTycoon
             track = false;
             focusedSite = null;
             city.TrackPlayer(false);
+            overviewSelected = false;
             city.FocusGrowth(cityLevel);
         }
 
         void FollowPlayer()
         {
             track = true;
+            overviewSelected = false;
             focusedSite = null;
             city.Focus(null);
             city.TrackPlayer(true);
@@ -287,30 +357,25 @@ namespace NaraTycoon
         {
             if (model.Data.Orders[id].Step != Step.Inspect || !RequireVisit(model.Supplier(id))) return;
             examining = id;
-            hud.ShowInspection(id);
+            hud.ShowInspectionChallenge(id);
         }
 
         internal void CloseInspection() => examining = -1;
 
-        internal void Judge(int id, bool reject)
+        internal void FinishInspectionMeasurement(int id)
         {
-            if (!RequireVisit(model.Supplier(id))) return;
-            if (!model.Inspect(id, reject))
-            {
-                hud.FlashInspection("판정을 다시 확인하세요. 제품의 상태와 측정값을 살펴보세요.", true);
-                audio.Error();
-                return;
-            }
+            if (examining != id || !model.CompleteInspection(id)) return;
             city.Burst(city.Dock(model.Supplier(id)) + Vector3.up, 11);
-            audio.Confirm();
-            if (model.Data.Orders[id].Step == Step.Inspect)
-            {
-                hud.ShowInspection(id);
-                hud.FlashInspection(reject ? "불량 표시를 기록했습니다." : "합격을 기록했습니다.", false);
-            }
-            else
-                hud.CloseModal();
+            hud.CloseModal();
             Save();
+        }
+
+        internal void InspectionCue(int combo)
+        {
+            if (combo == 0) audio.Error();
+            else if (combo == 1) audio.Click();
+            else if (combo == 2) audio.Confirm();
+            else audio.Reward();
         }
 
         internal void StartTrip(int id, bool supply)
@@ -368,15 +433,8 @@ namespace NaraTycoon
             city.EndTransportGuide();
         }
 
-        public void FinishDriving()
+        void FinishDriving()
         {
-            if (Mode != ScreenState.Playing || !Driving) return;
-            if (!InUnloadZone)
-            {
-                hud.Toast("표시된 하역 구역까지 이동하세요.", false);
-                return;
-            }
-
             var trip = manual;
             trip.Speed = 0;
             Vector3 exit = trip.Truck.position - trip.Truck.right * 1.6f;
@@ -396,6 +454,13 @@ namespace NaraTycoon
 
         void Update()
         {
+            if (Mode == ScreenState.Ended)
+            {
+                if (Keyboard.current?.escapeKey.wasPressedThisFrame == true) CompleteEnding();
+                else AdvanceEnding(Time.unscaledDeltaTime);
+                return;
+            }
+
             float dt = Time.deltaTime;
             float movement = Mathf.Min(dt, .05f * model.TimeMultiplier);
             var keyboard = Keyboard.current;
@@ -406,23 +471,16 @@ namespace NaraTycoon
             }
             if (Mode == ScreenState.Playing)
             {
-                if (!hud.HasModal && keyboard != null)
-                {
-                    if (keyboard.vKey.wasPressedThisFrame) ChangeView();
-                    if (keyboard.eKey.wasPressedThisFrame)
-                    {
-                        if (Driving) FinishDriving();
-                        else if (AtSite) { Focus(Nearby); hud.Interact(Nearby); }
-                    }
-                }
+                if (!hud.HasModal && keyboard != null && keyboard.vKey.wasPressedThisFrame) ChangeView();
                 if (manual != null)
                     MoveManual(hud.HasModal ? Vector2.zero : InputVector(keyboard), keyboard != null && keyboard.spaceKey.isPressed, movement);
                 else
-                    MoveHero(hud.HasModal ? Vector2.zero : InputVector(keyboard), keyboard != null && keyboard.leftShiftKey.isPressed, movement);
+                    MoveHero(hud.HasModal ? Vector2.zero : InputVector(keyboard), movement);
                 MoveWorkers(movement);
                 int before = model.Data.Happiness;
                 int deliveries = model.Completed;
                 model.Tick(dt, examining, FreeTrucks(false), FreeTrucks(true));
+                ShowTownEvent();
                 if (model.Data.Happiness > before && model.Completed == deliveries)
                 {
                     statusPulse.PlayFeedbacks();
@@ -441,13 +499,14 @@ namespace NaraTycoon
                     city.Burst(city.GrowthLandmark(cityLevel) + Vector3.up * 2.5f, 62);
                     if (!Driving) city.Burst(city.Hero.position + Vector3.up * 1.6f, 12);
                     hud.AnnounceGrowth();
-                    hud.Toast($"{CityPresentation.Threshold(cityLevel):N0} 하트 달성 · {CityPresentation.LevelName(cityLevel)}", true);
+                    hud.Toast($"도시 행복도 {CityPresentation.Threshold(cityLevel):N0} 달성 · {CityPresentation.LevelName(cityLevel)}", true);
                     audio.Reward();
                 }
             }
             float elapsed = Mode == ScreenState.Title ? 27f : model.Data.Clock;
             city.ApplyDay(elapsed);
             city.UpdateCamera(Driving ? manual.Truck : city.Hero, Mode == ScreenState.Title, Time.unscaledDeltaTime);
+            city.UpdateSeason(Mode == ScreenState.Title ? 0 : model.Data.Clock, Time.unscaledDeltaTime);
             refresh -= Time.unscaledDeltaTime;
             if (changed || refresh <= 0)
             {
@@ -455,7 +514,23 @@ namespace NaraTycoon
                 changed = false;
                 refresh = .19f;
             }
-            hud.UpdateMarkers();
+            hud.UpdateOperations(Time.unscaledDeltaTime, keyboard);
+        }
+
+        void OnEnable() => CinemachineCore.CameraUpdatedEvent.AddListener(UpdateCameraHud);
+        void OnDisable() => CinemachineCore.CameraUpdatedEvent.RemoveListener(UpdateCameraHud);
+
+        void UpdateCameraHud(CinemachineBrain brain)
+        {
+            if (brain.OutputCamera == city.Camera) hud?.UpdateMarkers();
+        }
+
+        void ShowTownEvent()
+        {
+            var active = model.ActiveEvent;
+            if (active != lastTownEvent && active != TownEvent.None) audio.Reward();
+            lastTownEvent = active;
+            city.UpdateTownEventVisuals(active, model.Data.Clock);
         }
 
         static Vector2 InputVector(Keyboard kb)
@@ -466,12 +541,12 @@ namespace NaraTycoon
                 (kb.wKey.isPressed || kb.upArrowKey.isPressed ? 1 : 0) - (kb.sKey.isPressed || kb.downArrowKey.isPressed ? 1 : 0));
         }
 
-        void MoveHero(Vector2 input, bool sprint, float dt)
+        void MoveHero(Vector2 input, float dt)
         {
             Vector3 direction = WorldDirection(input);
             var pos = city.Hero.position;
             var previous = pos;
-            Vector3 shift = direction * (sprint ? 11 : 7) * dt;
+            Vector3 shift = direction * 11f * dt;
             Slide(ref pos, shift, .24f);
             pos.y = .10f;
             city.Hero.position = pos;
@@ -506,7 +581,7 @@ namespace NaraTycoon
             }
             bool leftBuilding = previousSite.HasValue && !AtSite;
             if (leftBuilding) hud.LeaveSite();
-            if (!track && (leftBuilding || (moving && (!focusedSite.HasValue ||
+            if (!track && !overviewSelected && (leftBuilding || (moving && (!focusedSite.HasValue ||
                 city.SiteDistance(focusedSite.Value, position) > ExitDistance))))
                 FollowPlayer();
             return AtSite;
@@ -523,6 +598,12 @@ namespace NaraTycoon
 
         void MoveManual(Vector2 input, bool brake, float dt)
         {
+            if (InUnloadZone)
+            {
+                FinishDriving();
+                return;
+            }
+
             var truck = manual.Truck;
             var pos = truck.position;
             bool road = city.IsRoad(pos);
@@ -541,7 +622,12 @@ namespace NaraTycoon
             if (shift.sqrMagnitude > .003f && (pos - start).sqrMagnitude < shift.sqrMagnitude * .08f)
                 manual.Speed = 0;
             truck.position = pos;
-            city.UpdateTransportGuide(pos, InUnloadZone, dt);
+            if (InUnloadZone)
+            {
+                FinishDriving();
+                return;
+            }
+            city.UpdateTransportGuide(pos, false, dt);
             dustClock -= dt;
             if (!road && Mathf.Abs(manual.Speed) > 3 && dustClock < 0)
             {

@@ -18,6 +18,7 @@ namespace NaraTycoon.Editor
         const string Dev = "Assets/Dev";
         const string Model = Dev + "/Models/Narmi.fbx";
         const string DariModel = Dev + "/Models/Dari.fbx";
+        const string Soundtrack = Dev + "/Audios/audiomass-output (1).mp3";
         const string BuildPath = "Builds/NaraTycoon";
 
         [MenuItem("나라장터 타이쿤/게임 씬 열기")]
@@ -45,7 +46,11 @@ namespace NaraTycoon.Editor
 
         public static string InstallUrbanScene() => EditScene(ConfigureUrbanDistricts);
 
-        public static string InstallGrowthScene() => EditScene(city => city.AuthorGrowthMilestones());
+        public static string InstallGrowthScene() => EditScene(city =>
+        {
+            city.AuthorGrowthMilestones();
+            city.AuthorFacadeGrowth();
+        });
 
         static string EditScene(Action<CityWorld> configure)
         {
@@ -61,6 +66,7 @@ namespace NaraTycoon.Editor
                 SceneManager.SetActiveScene(scene);
                 var city = scene.GetRootGameObjects().SelectMany(root => root.GetComponentsInChildren<CityWorld>()).Single();
                 configure(city);
+                city.AlignRoadsideProps();
                 PersistMaterials(city);
                 if (!EditorSceneManager.SaveScene(scene)) throw new IOException("Could not save the revised city.");
                 AssetDatabase.SaveAssets();
@@ -110,13 +116,16 @@ namespace NaraTycoon.Editor
             var particleShader = Shader.Find("Sprites/Default");
             var regular = AssetDatabase.LoadAssetAtPath<Font>(Dev + "/Fonts/SolbitSans-Regular.ttf");
             var bold = AssetDatabase.LoadAssetAtPath<Font>(Dev + "/Fonts/SolbitSans-Bold.ttf");
+            var soundtrack = AssetDatabase.LoadAssetAtPath<AudioClip>(Soundtrack);
             if (regular == null || bold == null || narmi == null || cityShader == null || particleShader == null)
                 throw new InvalidOperationException("City authoring requires Narmi, the Korean fonts and the URP shaders.");
+            if (soundtrack == null) throw new InvalidOperationException($"Missing soundtrack at {Soundtrack}.");
             city.Author(narmi, animator, cityShader, particleShader);
             ConfigureDari(city);
-            gameObject.AddComponent<NaraGame>().Configure(city, regular, bold);
+            gameObject.AddComponent<NaraGame>().Configure(city, regular, bold, soundtrack);
             PersistAssets(city);
             ConfigureUrbanDistricts(city);
+            city.AlignRoadsideProps();
             PersistMaterials(city);
             if (!EditorSceneManager.SaveScene(scene, GameScene)) throw new IOException("Could not save the NaraTycoon scene.");
             EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(GameScene, true) }
@@ -167,6 +176,7 @@ namespace NaraTycoon.Editor
             var night = UrbanProfile("Solbit Night", "D8E3FF", -.25f, 12, 4, .63f, .88f, -12, false);
             city.AuthorUrbanDistricts(dawn, dusk, night);
             city.AuthorGrowthMilestones();
+            city.AuthorFacadeGrowth();
 
             var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(Dev + "/Materials/Dari Face.png");
             const string faceFile = "/Materials/Dari Dari · orange, white muzzle and forehead stripes.002.mat";
