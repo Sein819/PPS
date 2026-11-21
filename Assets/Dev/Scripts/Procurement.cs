@@ -686,8 +686,8 @@ namespace NaraTycoon
 
         static float EventMultiplier(TownEvent townEvent) => townEvent switch
         {
-            TownEvent.Fireworks => 1.15f,
-            TownEvent.NightMarket => 1.4f,
+            TownEvent.Fireworks => 1.4f,
+            TownEvent.NightMarket => 1.15f,
             TownEvent.GoldenGear => 1.3f,
             _ => 1
         };
